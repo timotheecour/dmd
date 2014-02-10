@@ -499,9 +499,7 @@ void TemplateDeclaration::semantic(Scope *sc)
     // Remember templates defined in module object that we need to know about
     if (sc->module && sc->module->ident == Id::object)
     {
-        if (ident == Id::AssociativeArray)
-            Type::associativearray = this;
-        else if (ident == Id::RTInfo)
+        if (ident == Id::RTInfo)
             Type::rtinfo = this;
     }
 
@@ -990,6 +988,12 @@ Lret:
 
 MATCH TemplateDeclaration::leastAsSpecialized(Scope *sc, TemplateDeclaration *td2, Expressions *fargs)
 {
+#define LOG_LEASTAS     0
+
+#if LOG_LEASTAS
+    printf("%s.leastAsSpecialized(%s)\n", toChars(), td2->toChars());
+#endif
+
     /* This works by taking the template parameters to this template
      * declaration and feeding them to td2 as if it were a template
      * instance.
@@ -998,14 +1002,11 @@ MATCH TemplateDeclaration::leastAsSpecialized(Scope *sc, TemplateDeclaration *td
      */
 
     TemplateInstance ti(Loc(), ident);      // create dummy template instance
-    Objects dedtypes;
-
-#define LOG_LEASTAS     0
-
-#if LOG_LEASTAS
-    printf("%s.leastAsSpecialized(%s)\n", toChars(), td2->toChars());
-#endif
-
+    ti.tinst = this->getInstantiating(sc);
+    if (ti.tinst)
+        ti.instantiatingModule = ti.tinst->instantiatingModule;
+    else
+        ti.instantiatingModule = sc->instantiatingModule();
     // Set type arguments to dummy template instance to be types
     // generated from the parameters to this template declaration
     ti.tiargs = new Objects();
@@ -1022,7 +1023,7 @@ MATCH TemplateDeclaration::leastAsSpecialized(Scope *sc, TemplateDeclaration *td
     }
 
     // Temporary Array to hold deduced types
-    //dedtypes.setDim(parameters->dim);
+    Objects dedtypes;
     dedtypes.setDim(td2->parameters->dim);
 
     // Attempt a type deduction
@@ -2151,6 +2152,11 @@ void functionResolve(Match *m, Dsymbol *dstart, Loc loc, Scope *sc,
             if (!tiargs)
                 tiargs = new Objects();
             TemplateInstance *ti = new TemplateInstance(loc, td, tiargs);
+            ti->tinst = td->getInstantiating(sc);
+            if (ti->tinst)
+                ti->instantiatingModule = ti->tinst->instantiatingModule;
+            else
+                ti->instantiatingModule = sc->instantiatingModule();
 
             Objects dedtypes;
             dedtypes.setDim(td->parameters->dim);
@@ -2245,7 +2251,10 @@ void functionResolve(Match *m, Dsymbol *dstart, Loc loc, Scope *sc,
 
             TemplateInstance *ti = new TemplateInstance(loc, td, tiargs);
             ti->tinst = td->getInstantiating(sc);
-            ti->instantiatingModule = sc->instantiatingModule();
+            if (ti->tinst)
+                ti->instantiatingModule = ti->tinst->instantiatingModule;
+            else
+                ti->instantiatingModule = sc->instantiatingModule();
             ti->parent = td->parent;    // Maybe calculating valid 'enclosing' is unnecessary.
             ti->semantictiargsdone = true;
             ti->symtab = new DsymbolTable();
@@ -3333,10 +3342,6 @@ MATCH Type::deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters,
                 goto Lnomatch;
         }
 
-        // Can't instantiate AssociativeArray!() without a scope
-        if (tparam->ty == Taarray && !((TypeAArray*)tparam)->sc)
-            ((TypeAArray*)tparam)->sc = sc;
-
         MATCH m = implicitConvTo(tparam);
         if (m == MATCHnomatch)
         {
@@ -3684,8 +3689,10 @@ MATCH TypeInstance::deduceType(Scope *sc,
             if (i < tempinst->tiargs->dim)
                 o1 = (*tempinst->tiargs)[i];
             else if (i < tempinst->tdtypes.dim && i < tp->tempinst->tiargs->dim)
+            {
                 // Pick up default arg
                 o1 = tempinst->tdtypes[i];
+            }
             else if (i >= tp->tempinst->tiargs->dim)
                 break;
 
@@ -4710,12 +4717,6 @@ void TemplateValueParameter::semantic(Scope *sc, TemplateParameters *parameters)
         return;
     }
     valType = valType->semantic(loc, sc);
-    if (!(valType->isintegral() || valType->isfloating() || valType->isString()) &&
-        valType->ty != Tident)
-    {
-        if (valType != Type::terror)
-            error(loc, "arithmetic/string type expected for value-parameter, not %s", valType->toChars());
-    }
 
 #if 0   // defer semantic analysis to arg match
     if (specValue)
@@ -4998,8 +4999,10 @@ MATCH TemplateTupleParameter::matchArg(Loc loc, Scope *sc, Objects *tiargs,
     Tuple *ovar;
 
     if ((*dedtypes)[i] && isTuple((*dedtypes)[i]))
-        // It was already been deduced
+    {
+        // It has already been deduced
         ovar = isTuple((*dedtypes)[i]);
+    }
     else if (i + 1 == tiargs->dim && isTuple((*tiargs)[i]))
         ovar = isTuple((*tiargs)[i]);
     else
@@ -6486,6 +6489,12 @@ bool TemplateInstance::needsTypeInference(Scope *sc, int flag)
 
         if (!flag)
         {
+            ti->tinst = td->getInstantiating(sc);
+            if (ti->tinst)
+                ti->instantiatingModule = ti->tinst->instantiatingModule;
+            else
+                ti->instantiatingModule = sc->instantiatingModule();
+
             /* Calculate the need for overload resolution.
              * When only one template can match with tiargs, inference is not necessary.
              */
@@ -6957,21 +6966,6 @@ void TemplateInstance::printInstantiationTrace()
                 i >= n_instantiations - max_shown + max_shown / 2)
                 errorSupplemental(cur->loc, format, cur->toChars());
             ++i;
-        }
-    }
-}
-
-void TemplateInstance::inlineScan()
-{
-#if LOG
-    printf("TemplateInstance::inlineScan('%s')\n", toChars());
-#endif
-    if (!errors && members)
-    {
-        for (size_t i = 0; i < members->dim; i++)
-        {
-            Dsymbol *s = (*members)[i];
-            s->inlineScan();
         }
     }
 }
@@ -7600,11 +7594,6 @@ void TemplateMixin::semantic3(Scope *sc)
         sc = sc->pop();
         sc->pop();
     }
-}
-
-void TemplateMixin::inlineScan()
-{
-    TemplateInstance::inlineScan();
 }
 
 const char *TemplateMixin::kind()

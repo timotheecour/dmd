@@ -42,6 +42,8 @@ void obj_startaddress(Symbol *s);
 void obj_lzext(Symbol *s1,Symbol *s2);
 
 void TypeInfo_toDt(dt_t **pdt, TypeInfoDeclaration *d);
+dt_t *Initializer_toDt(Initializer *init);
+dt_t **Type_toDt(Type *t, dt_t **pdt);
 
 /* ================================================================== */
 
@@ -914,7 +916,8 @@ void VarDeclaration::toObjFile(int multiobj)
         s->Sfl = FLdata;
 
         if (init)
-        {   s->Sdt = init->toDt();
+        {
+            s->Sdt = Initializer_toDt(init);
 
             // Look for static array that is block initialized
             Type *tb;
@@ -946,7 +949,7 @@ void VarDeclaration::toObjFile(int multiobj)
         }
         else
         {
-            type->toDt(&s->Sdt);
+            Type_toDt(type, &s->Sdt);
         }
         dt_optimize(s->Sdt);
 
@@ -1002,7 +1005,7 @@ void TypedefDeclaration::toObjFile(int multiobj)
         toInitializer();
         sinit->Sclass = scclass;
         sinit->Sfl = FLdata;
-        sinit->Sdt = tc->sym->init->toDt();
+        sinit->Sdt = Initializer_toDt(tc->sym->init);
         out_readonly(sinit);
         outdata(sinit);
     }

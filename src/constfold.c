@@ -40,35 +40,24 @@ Expression *expType(Type *type, Expression *e)
 
 /* ================================== isConst() ============================== */
 
-int Expression::isConst()
+int isConst(Expression *e)
 {
-    //printf("Expression::isConst(): %s\n", toChars());
+    //printf("Expression::isConst(): %s\n", e->toChars());
+    switch(e->op)
+    {
+        case TOKint64:
+        case TOKfloat64:
+        case TOKcomplex80:
+            return 1;
+        case TOKnull:
+            return 0;
+        case TOKsymoff:
+            return 2;
+        default:
+            return 0;
+    }
+    assert(0);
     return 0;
-}
-
-int IntegerExp::isConst()
-{
-    return 1;
-}
-
-int RealExp::isConst()
-{
-    return 1;
-}
-
-int ComplexExp::isConst()
-{
-    return 1;
-}
-
-int NullExp::isConst()
-{
-    return 0;
-}
-
-int SymOffExp::isConst()
-{
-    return 2;
 }
 
 /* =============================== constFold() ============================== */
@@ -1260,7 +1249,7 @@ Expression *Index(Type *type, Expression *e1, Expression *e2)
             e = (*ale->elements)[(size_t)i];
             e->type = type;
             e->loc = loc;
-            if (e->hasSideEffect())
+            if (hasSideEffect(e))
                 e = EXP_CANT_INTERPRET;
         }
     }
@@ -1279,7 +1268,7 @@ Expression *Index(Type *type, Expression *e1, Expression *e2)
             {   e = (*ale->elements)[(size_t)i];
                 e->type = type;
                 e->loc = loc;
-                if (e->hasSideEffect())
+                if (hasSideEffect(e))
                     e = EXP_CANT_INTERPRET;
             }
         }
@@ -1300,7 +1289,7 @@ Expression *Index(Type *type, Expression *e1, Expression *e2)
             {   e = (*ae->values)[i];
                 e->type = type;
                 e->loc = loc;
-                if (e->hasSideEffect())
+                if (hasSideEffect(e))
                     e = EXP_CANT_INTERPRET;
                 break;
             }
@@ -1353,7 +1342,7 @@ Expression *Slice(Type *type, Expression *e1, Expression *lwr, Expression *upr)
     }
     else if (e1->op == TOKarrayliteral &&
             lwr->op == TOKint64 && upr->op == TOKint64 &&
-            !e1->hasSideEffect())
+            !hasSideEffect(e1))
     {   ArrayLiteralExp *es1 = (ArrayLiteralExp *)e1;
         uinteger_t ilwr = lwr->toInteger();
         uinteger_t iupr = upr->toInteger();

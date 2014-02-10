@@ -209,7 +209,6 @@ public:
     static ClassDeclaration *typeinfoshared;
     static ClassDeclaration *typeinfowild;
 
-    static TemplateDeclaration *associativearray;
     static TemplateDeclaration *rtinfo;
 
     static Type *basic[TMAX];
@@ -231,7 +230,8 @@ public:
     Type *copy();
     virtual Type *syntaxCopy();
     bool equals(RootObject *o);
-    int dyncast() { return DYNCAST_TYPE; } // kludge for template.isType()
+    // kludge for template.isType()
+    int dyncast() { return DYNCAST_TYPE; }
     int covariant(Type *t, StorageClass *pstc = NULL);
     char *toChars();
     static char needThisPrefix();
@@ -324,7 +324,6 @@ public:
     virtual Expression *defaultInitLiteral(Loc loc);
     virtual Expression *voidInitLiteral(VarDeclaration *var);
     virtual int isZeroInit(Loc loc = Loc());                // if initializer is 0
-    virtual dt_t **toDt(dt_t **pdt);
     Identifier *getTypeInfoIdent(int internal);
     virtual MATCH deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters, Objects *dedtypes, unsigned *wm = NULL);
     virtual void resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsymbol **ps, bool intypeid = false);
@@ -336,7 +335,6 @@ public:
     virtual int hasWild();
     virtual Expression *toExpression();
     virtual int hasPointers();
-    virtual TypeTuple *toArgTypes();
     virtual Type *nextOf();
     Type *baseElemOf();
     uinteger_t sizemask();
@@ -371,7 +369,6 @@ public:
     Expression *dotExp(Scope *sc, Expression *e, Identifier *ident, int flag);
     Expression *defaultInit(Loc loc);
     Expression *defaultInitLiteral(Loc loc);
-    TypeTuple *toArgTypes();
     void accept(Visitor *v) { v->visit(this); }
 };
 
@@ -427,7 +424,6 @@ public:
     Expression *defaultInit(Loc loc);
     int isZeroInit(Loc loc);
     int builtinTypeInfo();
-    TypeTuple *toArgTypes();
 
     // For eliminating dynamic_cast
     TypeBasic *isTypeBasic();
@@ -462,9 +458,7 @@ public:
     Expression *defaultInitLiteral(Loc loc);
     TypeBasic *elementType();
     int isZeroInit(Loc loc);
-    dt_t **toDt(dt_t **pdt);
     TypeInfoDeclaration *getTypeInfoDeclaration();
-    TypeTuple *toArgTypes();
 
     void accept(Visitor *v) { v->visit(this); }
 };
@@ -501,15 +495,12 @@ public:
     Expression *defaultInit(Loc loc);
     Expression *defaultInitLiteral(Loc loc);
     Expression *voidInitLiteral(VarDeclaration *var);
-    dt_t **toDt(dt_t **pdt);
-    dt_t **toDtElem(dt_t **pdt, Expression *e);
     MATCH deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters, Objects *dedtypes, unsigned *wm = NULL);
     TypeInfoDeclaration *getTypeInfoDeclaration();
     Expression *toExpression();
     int hasPointers();
     int needsDestruction();
     bool needsNested();
-    TypeTuple *toArgTypes();
 
     void accept(Visitor *v) { v->visit(this); }
 };
@@ -537,7 +528,6 @@ public:
     MATCH deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters, Objects *dedtypes, unsigned *wm = NULL);
     TypeInfoDeclaration *getTypeInfoDeclaration();
     int hasPointers();
-    TypeTuple *toArgTypes();
 
     void accept(Visitor *v) { v->visit(this); }
 };
@@ -549,15 +539,12 @@ public:
     Loc loc;
     Scope *sc;
 
-    StructDeclaration *impl;    // implementation
-
     TypeAArray(Type *t, Type *index);
     static TypeAArray *create(Type *t, Type *index);
     const char *kind();
     Type *syntaxCopy();
     d_uns64 size(Loc loc);
     Type *semantic(Loc loc, Scope *sc);
-    StructDeclaration *getImpl();
     void resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsymbol **ps, bool intypeid = false);
     void toDecoBuffer(OutBuffer *buf, int flag);
     void toCBuffer2(OutBuffer *buf, HdrGenState *hgs, int mod);
@@ -570,7 +557,6 @@ public:
     Type *reliesOnTident(TemplateParameters *tparams);
     Expression *toExpression();
     int hasPointers();
-    TypeTuple *toArgTypes();
     MATCH implicitConvTo(Type *to);
     MATCH constConv(Type *to);
 
@@ -596,7 +582,6 @@ public:
     int isZeroInit(Loc loc);
     TypeInfoDeclaration *getTypeInfoDeclaration();
     int hasPointers();
-    TypeTuple *toArgTypes();
 
     void accept(Visitor *v) { v->visit(this); }
 };
@@ -705,7 +690,6 @@ public:
     TypeInfoDeclaration *getTypeInfoDeclaration();
     Expression *dotExp(Scope *sc, Expression *e, Identifier *ident, int flag);
     int hasPointers();
-    TypeTuple *toArgTypes();
 
     void accept(Visitor *v) { v->visit(this); }
 };
@@ -714,8 +698,9 @@ class TypeQualified : public Type
 {
 public:
     Loc loc;
-    Objects idents;         // array of Identifier and TypeInstance,
-                            // representing ident.ident!tiargs.ident. ... etc.
+    // array of Identifier and TypeInstance,
+    // representing ident.ident!tiargs.ident. ... etc.
+    Objects idents;
 
     TypeQualified(TY ty, Loc loc);
     void syntaxCopyHelper(TypeQualified *t);
@@ -839,11 +824,9 @@ public:
     int checkBoolean();
     int needsDestruction();
     bool needsNested();
-    dt_t **toDt(dt_t **pdt);
     MATCH deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters, Objects *dedtypes, unsigned *wm = NULL);
     TypeInfoDeclaration *getTypeInfoDeclaration();
     int hasPointers();
-    TypeTuple *toArgTypes();
     MATCH implicitConvTo(Type *to);
     MATCH constConv(Type *to);
     unsigned char deduceWild(Type *t, bool isRef);
@@ -889,7 +872,6 @@ public:
     MATCH deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters, Objects *dedtypes, unsigned *wm = NULL);
     TypeInfoDeclaration *getTypeInfoDeclaration();
     int hasPointers();
-    TypeTuple *toArgTypes();
     Type *nextOf();
 
     void accept(Visitor *v) { v->visit(this); }
@@ -931,11 +913,9 @@ public:
     Expression *defaultInit(Loc loc);
     Expression *defaultInitLiteral(Loc loc);
     int isZeroInit(Loc loc);
-    dt_t **toDt(dt_t **pdt);
     MATCH deduceType(Scope *sc, Type *tparam, TemplateParameters *parameters, Objects *dedtypes, unsigned *wm = NULL);
     TypeInfoDeclaration *getTypeInfoDeclaration();
     int hasPointers();
-    TypeTuple *toArgTypes();
     int hasWild();
 
     void accept(Visitor *v) { v->visit(this); }
@@ -970,7 +950,6 @@ public:
     int checkBoolean();
     TypeInfoDeclaration *getTypeInfoDeclaration();
     int hasPointers();
-    TypeTuple *toArgTypes();
     int builtinTypeInfo();
 
     Symbol *toSymbol();
@@ -1052,7 +1031,8 @@ public:
     Parameter *syntaxCopy();
     Type *isLazyArray();
     void toDecoBuffer(OutBuffer *buf);
-    int dyncast() { return DYNCAST_PARAMETER; } // kludge for template.isType()
+    // kludge for template.isType()
+    int dyncast() { return DYNCAST_PARAMETER; }
     static Parameters *arraySyntaxCopy(Parameters *args);
     static char *argsTypesToChars(Parameters *args, int varargs);
     static void argsToCBuffer(OutBuffer *buf, HdrGenState *hgs, Parameters *arguments, int varargs);

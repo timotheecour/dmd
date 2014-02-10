@@ -74,7 +74,6 @@ FuncDeclaration::FuncDeclaration(Loc loc, Loc endloc, Identifier *id, StorageCla
     inlineNest = 0;
     ctfeCode = NULL;
     isArrayOp = 0;
-    dArrayOp = NULL;
     semantic3Errors = false;
     fes = NULL;
     introducing = 0;
@@ -191,12 +190,7 @@ void FuncDeclaration::semantic(Scope *sc)
     else
         linkage = sc->linkage;
     protection = sc->protection;
-    userAttributes = sc->userAttributes;
-    if (userAttributes)
-    {
-        userAttributesScope = sc;
-        userAttributesScope->setNoFree();
-    }
+    userAttribDecl = sc->userAttribDecl;
 
     if (!originalType)
         originalType = type->syntaxCopy();
@@ -393,30 +387,6 @@ void FuncDeclaration::semantic(Scope *sc)
         {
             goto Ldone;
         }
-#if 0
-        // Verify no constructors, destructors, etc.
-        if (isCtorDeclaration()
-            //||isDtorDeclaration()
-            //|| isInvariantDeclaration()
-            //|| isUnitTestDeclaration()
-           )
-        {
-            error("special member functions not allowed for %ss", sd->kind());
-        }
-
-        if (isInvariantDeclaration())
-            sd->invs.push(this);
-
-        if (!sd->aggNew)
-            sd->aggNew = isNewDeclaration();
-
-        if (isDelete())
-        {
-            if (sd->aggDelete)
-                error("multiple delete's for struct %s", sd->toChars());
-            sd->aggDelete = (DeleteDeclaration *)(this);
-        }
-#endif
     }
 
     id = parent->isInterfaceDeclaration();
@@ -1049,7 +1019,7 @@ void FuncDeclaration::semantic3(Scope *sc)
         sc2->tf = NULL;
         sc2->noctor = 0;
         sc2->speculative = sc->speculative || isSpeculative() != NULL;
-        sc2->userAttributes = NULL;
+        sc2->userAttribDecl = NULL;
         if (sc2->intypeof == 1) sc2->intypeof = 2;
         sc2->fieldinit = NULL;
         sc2->fieldinit_dim = 0;
@@ -1662,8 +1632,10 @@ void FuncDeclaration::semantic3(Scope *sc)
                         }
                     }
                     else if (p->storage_class & STClazy)
+                    {
                         // If the last parameter is lazy, it's the size of a delegate
                         offset += Target::ptrsize * 2;
+                    }
                     else
                         offset += p->type->size();
                     offset = (offset + Target::ptrsize - 1) & ~(Target::ptrsize - 1);  // assume stack aligns on pointer size
@@ -2053,7 +2025,7 @@ void FuncDeclaration::bodyToCBuffer(OutBuffer *buf, HdrGenState *hgs)
         {
             buf->writestring("in");
             buf->writenl();
-            frequire->toCBuffer(buf, hgs);
+            ::toCBuffer(frequire, buf, hgs);
         }
 
         // out{}
@@ -2067,7 +2039,7 @@ void FuncDeclaration::bodyToCBuffer(OutBuffer *buf, HdrGenState *hgs)
                 buf->writeByte(')');
             }
             buf->writenl();
-            fensure->toCBuffer(buf, hgs);
+            ::toCBuffer(fensure, buf, hgs);
         }
 
         if (frequire || fensure)
@@ -2079,7 +2051,7 @@ void FuncDeclaration::bodyToCBuffer(OutBuffer *buf, HdrGenState *hgs)
         buf->writeByte('{');
         buf->writenl();
         buf->level++;
-        fbody->toCBuffer(buf, hgs);
+        ::toCBuffer(fbody, buf, hgs);
         buf->level--;
         buf->writeByte('}');
         buf->writenl();
@@ -3912,8 +3884,7 @@ FuncAliasDeclaration::FuncAliasDeclaration(FuncDeclaration *funcalias, bool hasO
         assert(!funcalias->isFuncAliasDeclaration());
         this->hasOverloads = false;
     }
-    userAttributes = funcalias->userAttributes;
-    userAttributesScope = funcalias->userAttributesScope;
+    userAttribDecl = funcalias->userAttribDecl;
 }
 
 const char *FuncAliasDeclaration::kind()

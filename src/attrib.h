@@ -45,7 +45,6 @@ public:
     void semantic(Scope *sc);
     void semantic2(Scope *sc);
     void semantic3(Scope *sc);
-    void inlineScan();
     void addComment(const utf8_t *comment);
     void emitComment(Scope *sc);
     const char *kind();
@@ -235,8 +234,10 @@ public:
     UserAttributeDeclaration(Expressions *atts, Dsymbols *decl);
     Dsymbol *syntaxCopy(Dsymbol *s);
     void semantic(Scope *sc);
+    void semantic2(Scope *sc);
     void setScope(Scope *sc);
     static Expressions *concat(Expressions *udas1, Expressions *udas2);
+    Expressions *getAttributes();
     void toCBuffer(OutBuffer *buf, HdrGenState *hgs);
     const char *kind();
     void accept(Visitor *v) { v->visit(this); }

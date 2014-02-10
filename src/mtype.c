@@ -76,7 +76,6 @@ ClassDeclaration *Type::typeinfoinvariant;
 ClassDeclaration *Type::typeinfoshared;
 ClassDeclaration *Type::typeinfowild;
 
-TemplateDeclaration *Type::associativearray;
 TemplateDeclaration *Type::rtinfo;
 
 Type *Type::tvoid;
@@ -1293,7 +1292,9 @@ Type *Type::aliasthisOf()
             else if (d->isFuncDeclaration())
             {
                 FuncDeclaration *fd = resolveFuncCall(Loc(), NULL, d, NULL, this, NULL, 1);
-                if (fd && fd->functionSemantic())
+                if (fd && !fd->type->nextOf() && !fd->functionSemantic())
+                    fd = NULL;
+                if (fd)
                 {
                     t = fd->type->nextOf();
                     t = t->substWildTo(mod == 0 ? MODmutable : mod);
@@ -1995,7 +1996,7 @@ Type *Type::unqualify(unsigned m)
     Type *t = mutableOf()->unSharedOf();
 
     Type *tn = nextOf();
-    if (tn && tn->ty != Tfunction/*!(ty == Tpointer && tn->ty == Tfunction)*/)
+    if (tn && tn->ty != Tfunction)
     {
         Type *utn = tn->unqualify(m);
         if (utn != tn)
@@ -2094,6 +2095,8 @@ L1:
                 t = t->mutableOf();
         }
     }
+    if (isConst())
+        t = t->addMod(MODconst);
     if (isShared())
         t = t->addMod(MODshared);
 
@@ -2652,8 +2655,6 @@ Type *TypeNext::makeConst()
                 t->next = next->constOf();
         }
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeConst() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2672,9 +2673,6 @@ Type *TypeNext::makeImmutable()
     {
         t->next = next->immutableOf();
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
-    //printf("TypeNext::makeImmutable() returns %p, %s\n", t, t->toChars());
     return t;
 }
 
@@ -2705,8 +2703,6 @@ Type *TypeNext::makeShared()
                 t->next = next->sharedOf();
         }
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeShared() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2728,8 +2724,6 @@ Type *TypeNext::makeSharedConst()
         else
             t->next = next->sharedConstOf();
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeSharedConst() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2761,8 +2755,6 @@ Type *TypeNext::makeWild()
                 t->next = next->wildOf();
         }
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeWild() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2784,8 +2776,6 @@ Type *TypeNext::makeWildConst()
         else
             t->next = next->wildConstOf();
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeWildConst() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2807,8 +2797,6 @@ Type *TypeNext::makeSharedWild()
         else
             t->next = next->sharedWildOf();
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeSharedWild() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2827,10 +2815,6 @@ Type *TypeNext::makeSharedWildConst()
     {
         t->next = next->sharedWildConstOf();
     }
-    if (ty == Taarray)
-    {
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
-    }
     //printf("TypeNext::makeSharedWildConst() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -2843,8 +2827,6 @@ Type *TypeNext::makeMutable()
     {
         t->next = next->mutableOf();
     }
-    if (ty == Taarray)
-        ((TypeAArray *)t)->impl = NULL;         // lazily recompute it
     //printf("TypeNext::makeMutable() returns %p, %s\n", t, t->toChars());
     return t;
 }
@@ -4491,8 +4473,10 @@ int TypeSArray::hasPointers()
         //return false;
 
     if (next->ty == Tvoid)
+    {
         // Arrays of void contain arbitrary data, which may include pointers
         return true;
+    }
     else
         return next->hasPointers();
 }
@@ -4728,7 +4712,6 @@ TypeAArray::TypeAArray(Type *t, Type *index)
     : TypeArray(Taarray, t)
 {
     this->index = index;
-    this->impl = NULL;
     this->loc = Loc();
     this->sc = NULL;
 }
@@ -4758,7 +4741,7 @@ Type *TypeAArray::syntaxCopy()
 
 d_uns64 TypeAArray::size(Loc loc)
 {
-    return Target::ptrsize /* * 2*/;
+    return Target::ptrsize;
 }
 
 
@@ -4860,73 +4843,6 @@ printf("index->ito->ito = x%x\n", index->ito->ito);
     return merge();
 }
 
-StructDeclaration *TypeAArray::getImpl()
-{
-    // Do it lazily
-    if (!impl)
-    {
-        Type *index = this->index;
-        Type *next = this->next;
-        if (index->reliesOnTident() || next->reliesOnTident())
-        {
-            error(loc, "cannot create associative array %s", toChars());
-            index = terror;
-            next = terror;
-
-            // Head off future failures
-            StructDeclaration *s = new StructDeclaration(Loc(), NULL);
-            s->type = terror;
-            impl = s;
-            return impl;
-        }
-        /* This is really a proxy for the template instance AssocArray!(index, next)
-         * But the instantiation can fail if it is a template specialization field
-         * which has Tident's instead of real types.
-         */
-        Objects *tiargs = new Objects();
-        tiargs->push(index->substWildTo(MODconst)); // hack for bug7757
-        tiargs->push(next ->substWildTo(MODconst)); // hack for bug7757
-
-        // Create AssociativeArray!(index, next)
-#if 1
-        if (! Type::associativearray)
-        {
-            ObjectNotFound(Id::AssociativeArray);
-        }
-        TemplateInstance *ti = new TemplateInstance(loc, Type::associativearray, tiargs);
-#else
-        //Expression *e = new IdentifierExp(loc, Id::object);
-        Expression *e = new IdentifierExp(loc, Id::empty);
-        //e = new DotIdExp(loc, e, Id::object);
-        DotTemplateInstanceExp *dti = new DotTemplateInstanceExp(loc,
-                    e,
-                    Id::AssociativeArray,
-                    tiargs);
-        dti->semantic(sc);
-        TemplateInstance *ti = dti->ti;
-#endif
-        // Instantiate on the root module of import dependency graph.
-        Module *mi = sc->module->importedFrom;
-        Scope *scx = sc->push(mi);
-        scx->module = mi;
-        scx->tinst = NULL;
-        assert(scx->instantiatingModule() == mi);
-        ti->semantic(scx);
-        ti->semantic2(scx);
-        ti->semantic3(scx);
-        scx->pop();
-        impl = ti->toAlias()->isStructDeclaration();
-#ifdef DEBUG
-        if (!impl)
-        {   Dsymbol *s = ti->toAlias();
-            printf("%s %s\n", s->kind(), s->toChars());
-        }
-#endif
-        assert(impl);
-    }
-    return impl;
-}
-
 void TypeAArray::resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsymbol **ps, bool intypeid)
 {
     //printf("TypeAArray::resolve() %s\n", toChars());
@@ -4962,17 +4878,20 @@ Expression *TypeAArray::dotExp(Scope *sc, Expression *e, Identifier *ident, int 
 #if LOGDOTEXP
     printf("TypeAArray::dotExp(e = '%s', ident = '%s')\n", e->toChars(), ident->toChars());
 #endif
-    if (ident != Id::__sizeof &&
-        ident != Id::__xalignof &&
-        ident != Id::init &&
-        ident != Id::mangleof &&
-        ident != Id::stringof &&
-        ident != Id::offsetof)
+    if (ident == Id::length)
     {
-        Type *t = getImpl()->type;
-        e = e->copy();
-        e->type = t;
-        e = t->dotExp(sc, e, ident, flag);
+        Expression *ec;
+        FuncDeclaration *fd;
+        Expressions *arguments;
+
+        Parameters *fparams = new Parameters();
+        fparams->push(new Parameter(STCin, this, NULL, NULL));
+        fd = FuncDeclaration::genCfunc(fparams, Type::tsize_t, Id::aaLen);
+        ec = new VarExp(e->loc, fd);
+        arguments = new Expressions();
+        arguments->push(e);
+        e = new CallExp(e->loc, ec, arguments);
+        e->type = ((TypeFunction *)fd->type)->next;
     }
     else
         e = Type::dotExp(sc, e, ident, flag);
@@ -5058,16 +4977,6 @@ MATCH TypeAArray::implicitConvTo(Type *to)
         {
             return MODimplicitConv(mod, to->mod) ? MATCHconst : MATCHnomatch;
         }
-    }
-    else if (to->ty == Tstruct && ((TypeStruct *)to)->sym->ident == Id::AssociativeArray)
-    {
-        int errs = global.startGagging();
-        Type *from = getImpl()->type;
-        if (global.endGagging(errs))
-        {
-            return MATCHnomatch;
-        }
-        return from->implicitConvTo(to);
     }
     return Type::implicitConvTo(to);
 }
@@ -6313,8 +6222,10 @@ MATCH TypeFunction::callMatch(Type *tthis, Expressions *args, int flag)
         {
             //printf("%s of type %s implicitConvTo %s\n", arg->toChars(), targ->toChars(), tprm->toChars());
             if (flag)
+            {
                 // for partial ordering, value is an irrelevant mockup, just look at the type
                 m = targ->implicitConvTo(tprm);
+            }
             else
                 m = arg->implicitConvTo(tprm);
             //printf("match %d\n", m);
@@ -7069,6 +6980,18 @@ void TypeIdentifier::resolve(Loc loc, Scope *sc, Expression **pe, Type **pt, Dsy
     }
 
     Dsymbol *s = sc->search(loc, ident, &scopesym);
+    if (s)
+    {
+        Declaration *d = s->isDeclaration();
+        if (d && d->inuse)
+        {
+            error(loc, "circular reference to '%s'", d->toPrettyChars());
+            *pe = NULL;
+            *ps = NULL;
+            *pt = Type::terror;
+            return;
+        }
+    }
     resolveHelper(loc, sc, s, scopesym, pe, pt, ps, intypeid);
     if (*pt)
         (*pt) = (*pt)->addMod(mod);
@@ -8276,7 +8199,7 @@ Expression *TypeStruct::dotExp(Scope *sc, Expression *e, Identifier *ident, int 
 
         Expression *e0 = NULL;
         Expression *ev = e->op == TOKtype ? NULL : e;
-        if (sc->func && ev && ev->hasSideEffect())
+        if (sc->func && ev && hasSideEffect(ev))
         {
             Identifier *id = Lexer::uniqueId("__tup");
             ExpInitializer *ei = new ExpInitializer(e->loc, ev);
@@ -8637,18 +8560,6 @@ MATCH TypeStruct::implicitConvTo(Type *to)
 {   MATCH m;
 
     //printf("TypeStruct::implicitConvTo(%s => %s)\n", toChars(), to->toChars());
-    if (to->ty == Taarray && sym->ident == Id::AssociativeArray)
-    {
-        /* If there is an error instantiating AssociativeArray!(), it shouldn't
-         * be reported -- it just means implicit conversion is impossible.
-         */
-        int errs = global.startGagging();
-        to = ((TypeAArray*)to)->getImpl()->type;
-        if (global.endGagging(errs))
-        {
-            return MATCHnomatch;
-        }
-    }
 
     if (ty == to->ty && sym == ((TypeStruct *)to)->sym)
     {
@@ -8727,7 +8638,7 @@ unsigned char TypeStruct::deduceWild(Type *t, bool isRef)
 
     unsigned char wm = 0;
 
-    if (sym->aliasthis && !(att & RECtracing))
+    if (t->hasWild() && sym->aliasthis && !(att & RECtracing))
     {
         att = (AliasThisRec)(att | RECtracing);
         wm = aliasthisOf()->deduceWild(t, isRef);
@@ -8853,7 +8764,7 @@ Expression *TypeClass::dotExp(Scope *sc, Expression *e, Identifier *ident, int f
 
         Expression *e0 = NULL;
         Expression *ev = e->op == TOKtype ? NULL : e;
-        if (sc->func && ev && ev->hasSideEffect())
+        if (sc->func && ev && hasSideEffect(ev))
         {
             Identifier *id = Lexer::uniqueId("__tup");
             ExpInitializer *ei = new ExpInitializer(e->loc, ev);
@@ -9271,7 +9182,7 @@ unsigned char TypeClass::deduceWild(Type *t, bool isRef)
 
     unsigned char wm = 0;
 
-    if (sym->aliasthis && !(att & RECtracing))
+    if (t->hasWild() && sym->aliasthis && !(att & RECtracing))
     {
         att = (AliasThisRec)(att | RECtracing);
         wm = aliasthisOf()->deduceWild(t, isRef);

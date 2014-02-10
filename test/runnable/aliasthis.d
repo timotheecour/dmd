@@ -946,39 +946,6 @@ void test6711()
         i = 42;
     }
     assert(c.i == 42);
-
-    struct Foo
-    {
-        string[string] strs;
-        alias strs this;
-    }
-
-    struct Bar
-    {
-        Foo f;
-        alias f this;
-    }
-
-    void test(T)()
-    {
-        T f;
-        f = ["first" : "a", "second" : "b"];
-        with (f)
-        {
-            assert(length == 2);
-            rehash;
-            auto vs = values;
-            assert(vs == ["a", "b"] || vs == ["b", "a"]);
-            auto ks = keys;
-            assert(ks == ["first", "second"] || ks == ["second", "first"]);
-            foreach (k; byKey) { }
-            foreach (v; byValue) { }
-            assert(get("a", "default") == "default");
-        }
-    }
-
-    test!Foo;
-    test!Bar;
 }
 
 /**********************************************/
@@ -1622,6 +1589,67 @@ void test11800()
     A11800 a;
     B11800 b;
     b.foo(a);
+}
+
+/***************************************************/
+// 12008
+
+struct RefCounted12008(T)
+{
+    struct RefCountedStore
+    {
+        private struct Impl
+        {
+            T _payload;
+        }
+
+        private void initialize(A...)(auto ref A args)
+        {
+            import core.memory;
+        }
+
+        void ensureInitialized()
+        {
+            initialize();
+        }
+
+    }
+    RefCountedStore _refCounted;
+
+    void opAssign(T rhs)
+    {
+    }
+
+    int refCountedPayload()
+    {
+        _refCounted.ensureInitialized();
+        return 0;
+    }
+
+    int refCountedPayload() inout;
+
+    alias refCountedPayload this;
+}
+
+struct SharedInput12008
+{
+    Group12008 unused;
+}
+
+struct Group12008
+{
+    RefCounted12008!SharedInput12008 _allGroups;
+}
+
+/***************************************************/
+// 12038
+
+bool f12038(void* p) { return true; }
+
+struct S12038
+{
+    @property p() { f12038(&this); }
+    alias p this;
 }
 
 /***************************************************/

@@ -199,6 +199,7 @@ DDOC_BLANKLINE  = $(BR)$(BR)\n\
 \n\
 DDOC_ANCHOR     = <a name=\"$1\"></a>\n\
 DDOC_PSYMBOL    = $(U $0)\n\
+DDOC_PSUPER_SYMBOL = $(U $0)\n\
 DDOC_KEYWORD    = $(B $0)\n\
 DDOC_PARAM      = $(I $0)\n\
 \n\
@@ -571,7 +572,9 @@ void emitUnittestComment(Scope *sc, Dsymbol *s, size_t ofs)
         }
 
         codebuf.writestring(")");
-        buf->insert(buf->offset - ofs, codebuf.data, codebuf.offset);
+        buf->insert(ofs, codebuf.data, codebuf.offset);
+        ofs += codebuf.offset;
+        sc->lastoffset2 = ofs;
     }
 }
 
@@ -605,12 +608,13 @@ void Dsymbol::emitDitto(Scope *sc)
     buf->spread(sc->lastoffset, b.offset);
     memcpy(buf->data + sc->lastoffset, b.data, b.offset);
     sc->lastoffset += b.offset;
+    sc->lastoffset2 += b.offset;
 
     Dsymbol *s = this;
     if (!s->ddocUnittest && parent)
         s = parent->isTemplateDeclaration();
     if (s)
-        emitUnittestComment(sc, s, strlen(ddoc_decl_dd_e));
+        emitUnittestComment(sc, s, sc->lastoffset2);
 }
 
 void ScopeDsymbol::emitMemberComments(Scope *sc)
@@ -678,8 +682,8 @@ void Declaration::emitComment(Scope *sc)
     //printf("Declaration::emitComment(%p '%s'), comment = '%s'\n", this, toChars(), comment);
     //printf("type = %p\n", type);
 
-    if (protection == PROTprivate || !ident ||
-        (!type && !isCtorDeclaration() && !isAliasDeclaration()))
+    if (protection == PROTprivate || sc->protection == PROTprivate ||
+        !ident || (!type && !isCtorDeclaration() && !isAliasDeclaration()))
         return;
     if (!comment)
         return;
@@ -710,7 +714,7 @@ void Declaration::emitComment(Scope *sc)
 void AggregateDeclaration::emitComment(Scope *sc)
 {
     //printf("AggregateDeclaration::emitComment() '%s'\n", toChars());
-    if (prot() == PROTprivate)
+    if (prot() == PROTprivate || sc->protection == PROTprivate)
         return;
     if (!comment)
         return;
@@ -741,7 +745,7 @@ void AggregateDeclaration::emitComment(Scope *sc)
 void TemplateDeclaration::emitComment(Scope *sc)
 {
     //printf("TemplateDeclaration::emitComment() '%s', kind = %s\n", toChars(), kind());
-    if (prot() == PROTprivate)
+    if (prot() == PROTprivate || sc->protection == PROTprivate)
         return;
 
     const utf8_t *com = comment;
@@ -796,10 +800,11 @@ void TemplateDeclaration::emitComment(Scope *sc)
 
 void EnumDeclaration::emitComment(Scope *sc)
 {
-    if (prot() == PROTprivate)
+    if (prot() == PROTprivate || sc->protection == PROTprivate)
         return;
-//    if (!comment)
-    {   if (isAnonymous() && members)
+    //if (!comment)
+    {
+        if (isAnonymous() && members)
         {
             for (size_t i = 0; i < members->dim; i++)
             {
@@ -840,7 +845,7 @@ void EnumDeclaration::emitComment(Scope *sc)
 void EnumMember::emitComment(Scope *sc)
 {
     //printf("EnumMember::emitComment(%p '%s'), comment = '%s'\n", this, toChars(), comment);
-    if (prot() == PROTprivate)
+    if (prot() == PROTprivate || sc->protection == PROTprivate)
         return;
     if (!comment)
         return;
@@ -1155,7 +1160,7 @@ void ClassDeclaration::toDocBuffer(OutBuffer *buf, Scope *sc)
             emitProtection(buf, bc->protection);
             if (bc->base)
             {
-                buf->writestring(bc->base->toPrettyChars());
+                buf->printf("$(DDOC_PSUPER_SYMBOL %s)", bc->base->toPrettyChars());
             }
             else
             {
@@ -1378,7 +1383,8 @@ void DocComment::writeSections(Scope *sc, Dsymbol *s, OutBuffer *buf)
             }
         }
         if (s->ddocUnittest)
-            emitUnittestComment(sc, s, 0);
+            emitUnittestComment(sc, s, buf->offset);
+        sc->lastoffset2 = buf->offset;
         buf->writestring(")\n");
     }
     else
@@ -2014,6 +2020,26 @@ TemplateParameter *isTemplateParameter(Dsymbol *s, const utf8_t *p, size_t len)
     return NULL;
 }
 
+/** Return true if str is a reserved symbol name that starts with a double underscore. */
+bool isReservedName(utf8_t *str, size_t len)
+{
+    static const char *table[] = {
+        "__ctor", "__dtor", "__cpctor", "__postblit", "__invariant", "__unitTest",
+        "__require", "__ensure", "__dollar", "__ctfe", "__withSym", "__result",
+        "__returnLabel", "__vptr", "__monitor", "__xopEquals", "__xopCmp",
+        "__LINE__", "__FILE__", "__MODULE__", "__FUNCTION__", "__PRETTY_FUNCTION__",
+        "__DATE__", "__TIME__", "__TIMESTAMP__", "__VENDOR__", "__VERSION__",
+        "__EOF__", "__LOCAL_SIZE", "___tls_get_addr", "__entrypoint", "__va_argsave_t",
+        "__va_argsave", NULL };
+
+    for (int i = 0; table[i]; i++)
+    {
+        if (cmp(table[i], str, len) == 0)
+            return true;
+    }
+    return false;
+}
+
 /**************************************************
  * Highlight text section.
  */
@@ -2260,7 +2286,9 @@ void highlightText(Scope *sc, Dsymbol *s, OutBuffer *buf, size_t offset)
                             break;
                         }
 
-                        if (buf->data[i] == '_')        // leading '_' means no highlight
+                        // leading '_' means no highlight unless it's a reserved symbol name
+                        if (buf->data[i] == '_' &&
+                            (i == buf->size-1 || !isReservedName((utf8_t *)(buf->data + i), j - i)))
                         {
                             buf->remove(i, 1);
                             i = j - 1;

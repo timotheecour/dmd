@@ -24,7 +24,6 @@ class Statement;
 class LabelDsymbol;
 class Initializer;
 class Module;
-struct InlineScanState;
 class ForeachStatement;
 class FuncDeclaration;
 class ExpInitializer;
@@ -598,7 +597,6 @@ public:
     CompiledCtfeFunction *ctfeCode;     // Compiled code for interpreter
     int inlineNest;                     // !=0 if nested inline
     bool isArrayOp;                     // true if array operation
-    FuncDeclaration *dArrayOp;          // D version of array op for ctfe
     bool semantic3Errors;               // true if errors in semantic3
                                         // this function's frame ptr
     ForeachStatement *fes;              // if foreach body, this is the foreach
@@ -697,10 +695,7 @@ public:
     virtual bool addPreInvariant();
     virtual bool addPostInvariant();
     Expression *interpret(InterState *istate, Expressions *arguments, Expression *thisexp = NULL);
-    void ctfeCompile();
-    void inlineScan();
     int canInline(int hasthis, int hdrscan, int statementsToo);
-    Expression *expandInline(InlineScanState *iss, Expression *eret, Expression *ethis, Expressions *arguments, Statement **ps);
     const char *kind();
     void toDocBuffer(OutBuffer *buf, Scope *sc);
     FuncDeclaration *isUnique();
@@ -913,7 +908,6 @@ public:
     bool addPreInvariant();
     bool addPostInvariant();
     void emitComment(Scope *sc);
-    void inlineScan();
     void toCBuffer(OutBuffer *buf, HdrGenState *hgs);
 
     UnitTestDeclaration *isUnitTestDeclaration() { return this; }

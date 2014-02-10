@@ -31,6 +31,8 @@
 #include "port.h"
 #include "ctfe.h"
 
+bool walkPostorder(Expression *e, StoppableVisitor *v);
+
 #define LOG     0
 #define LOGASSIGN 0
 #define LOGCOMPILE 0
@@ -98,12 +100,14 @@ struct InterState
     InterState *caller;         // calling function's InterState
     FuncDeclaration *fd;        // function being interpreted
     Statement *start;           // if !=NULL, start execution at this statement
-    Statement *gotoTarget;      /* target of EXP_GOTO_INTERPRET result; also
-                                 * target of labelled EXP_BREAK_INTERPRET or
-                                 * EXP_CONTINUE_INTERPRET. (NULL if no label).
-                                 */
-    bool awaitingLvalueReturn;  // Support for ref return values:
-           // Any return to this function should return an lvalue.
+    /* target of EXP_GOTO_INTERPRET result; also
+     * target of labelled EXP_BREAK_INTERPRET or
+     * EXP_CONTINUE_INTERPRET. (NULL if no label).
+     */
+    Statement *gotoTarget;
+    // Support for ref return values:
+    // Any return to this function should return an lvalue.
+    bool awaitingLvalueReturn;
     InterState();
 };
 
@@ -222,11 +226,7 @@ void CtfeStack::popAll(size_t stackpointer)
 
 void CtfeStack::saveGlobalConstant(VarDeclaration *v, Expression *e)
 {
-#if DMDV2
      assert( v->init && (v->isConst() || v->isImmutable() || v->storage_class & STCmanifest) && !v->isCTFE());
-#else
-     assert( v->init && v->isConst() && !v->isCTFE());
-#endif
      v->ctfeAdrOnStack = (int)globalValues.dim;
      globalValues.push(e);
 }
@@ -288,388 +288,425 @@ struct CompiledCtfeFunction
         //printf("%s CTFE declare %s\n", v->loc.toChars(), v->toChars());
         ++numVars;
     }
-    static int walkAllVars(Expression *e, void *_this);
+
     void onExpression(Expression *e)
     {
-        e->apply(&walkAllVars, this);
+        class VarWalker : public StoppableVisitor
+        {
+        public:
+            CompiledCtfeFunction *ccf;
+
+            VarWalker(CompiledCtfeFunction *ccf)
+                : ccf(ccf)
+            {
+            }
+
+            void visit(Expression *e)
+            {
+            }
+
+            void visit(ErrorExp *e)
+            {
+                // Currently there's a front-end bug: silent errors
+                // can occur inside delegate literals inside is(typeof()).
+                // Suppress the check in this case.
+                if (global.gag && ccf->func)
+                {
+                    stop = 1;
+                    return;
+                }
+
+                e->error("CTFE internal error: ErrorExp in %s\n", ccf->func ? ccf->func->loc.toChars() : ccf->callingloc.toChars());
+                assert(0);
+            }
+
+            void visit(DeclarationExp *e)
+            {
+                VarDeclaration *v = e->declaration->isVarDeclaration();
+                if (!v)
+                    return;
+                TupleDeclaration *td = v->toAlias()->isTupleDeclaration();
+                if (td)
+                {
+                    if (!td->objects)
+                        return;
+                    for(size_t i= 0; i < td->objects->dim; ++i)
+                    {
+                        RootObject *o = td->objects->tdata()[i];
+                        Expression *ex = isExpression(o);
+                        DsymbolExp *s = (ex && ex->op == TOKdsymbol) ? (DsymbolExp *)ex : NULL;
+                        assert(s);
+                        VarDeclaration *v2 = s->s->isVarDeclaration();
+                        assert(v2);
+                        if (!v2->isDataseg() || v2->isCTFE())
+                            ccf->onDeclaration(v2);
+                    }
+                }
+                else if (!(v->isDataseg() || v->storage_class & STCmanifest) || v->isCTFE())
+                    ccf->onDeclaration(v);
+                Dsymbol *s = v->toAlias();
+                if (s == v && !v->isStatic() && v->init)
+                {
+                    ExpInitializer *ie = v->init->isExpInitializer();
+                    if (ie)
+                        ccf->onExpression(ie->exp);
+                }
+            }
+
+            void visit(IndexExp *e)
+            {
+                if (e->lengthVar)
+                    ccf->onDeclaration(e->lengthVar);
+            }
+
+            void visit(SliceExp *e)
+            {
+                if (e->lengthVar)
+                    ccf->onDeclaration(e->lengthVar);
+            }
+        };
+
+        VarWalker v(this);
+        walkPostorder(e, &v);
     }
 };
 
-int CompiledCtfeFunction::walkAllVars(Expression *e, void *_this)
+class CtfeCompiler : public Visitor
 {
-    CompiledCtfeFunction *ccf = (CompiledCtfeFunction *)_this;
-    if (e->op == TOKerror)
-    {
-        // Currently there's a front-end bug: silent errors
-        // can occur inside delegate literals inside is(typeof()).
-        // Suppress the check in this case.
-        if (global.gag && ccf->func)
-            return 1;
+public:
+    CompiledCtfeFunction *ccf;
 
-        e->error("CTFE internal error: ErrorExp in %s\n", ccf->func ? ccf->func->loc.toChars() : ccf->callingloc.toChars());
+    CtfeCompiler(CompiledCtfeFunction *ccf)
+        : ccf(ccf)
+    {
+    }
+
+    void visit(Statement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s Statement::ctfeCompile %s\n", s->loc.toChars(), s->toChars());
+    #endif
         assert(0);
     }
-    if (e->op == TOKdeclaration)
+
+    void visit(ExpStatement *s)
     {
-        DeclarationExp *decl = (DeclarationExp *)e;
-        VarDeclaration *v = decl->declaration->isVarDeclaration();
-        if (!v)
-            return 0;
-        TupleDeclaration *td = v->toAlias()->isTupleDeclaration();
-        if (td)
+    #if LOGCOMPILE
+        printf("%s ExpStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->exp)
+            ccf->onExpression(s->exp);
+    }
+
+    void visit(CompoundStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s CompoundStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        for (size_t i = 0; i < s->statements->dim; i++)
         {
-            if (!td->objects)
-                return 0;
-            for(size_t i= 0; i < td->objects->dim; ++i)
-            {
-                RootObject *o = td->objects->tdata()[i];
-                Expression *ex = isExpression(o);
-                DsymbolExp *s = (ex && ex->op == TOKdsymbol) ? (DsymbolExp *)ex : NULL;
-                assert(s);
-                VarDeclaration *v2 = s->s->isVarDeclaration();
-                assert(v2);
-                if (!v2->isDataseg() || v2->isCTFE())
-                    ccf->onDeclaration(v2);
-            }
-        }
-        else if (!(v->isDataseg() || v->storage_class & STCmanifest) || v->isCTFE())
-            ccf->onDeclaration(v);
-        Dsymbol *s = v->toAlias();
-        if (s == v && !v->isStatic() && v->init)
-        {
-            ExpInitializer *ie = v->init->isExpInitializer();
-            if (ie)
-                ccf->onExpression(ie->exp);
+            Statement *sx = (*s->statements)[i];
+            if (sx)
+                ctfeCompile(sx);
         }
     }
-    else if (e->op == TOKindex && ((IndexExp *)e)->lengthVar)
-        ccf->onDeclaration( ((IndexExp *)e)->lengthVar);
-    else if (e->op == TOKslice && ((SliceExp *)e)->lengthVar)
-        ccf->onDeclaration( ((SliceExp *)e)->lengthVar);
-    return 0;
-}
 
-void Statement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s Statement::ctfeCompile %s\n", loc.toChars(), toChars());
-#endif
-    assert(0);
-}
-
-void ExpStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ExpStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (exp)
-        ccf->onExpression(exp);
-}
-
-void CompoundStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s CompoundStatement::ctfeCompile\n", loc.toChars());
-#endif
-    for (size_t i = 0; i < statements->dim; i++)
-    {   Statement *s = (*statements)[i];
-        if (s)
-            s->ctfeCompile(ccf);
-    }
-}
-
-void UnrolledLoopStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s UnrolledLoopStatement::ctfeCompile\n", loc.toChars());
-#endif
-    for (size_t i = 0; i < statements->dim; i++)
-    {   Statement *s = (*statements)[i];
-        if (s)
-            s->ctfeCompile(ccf);
-    }
-}
-
-void IfStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s IfStatement::ctfeCompile\n", loc.toChars());
-#endif
-
-    ccf->onExpression(condition);
-    if (ifbody)
-        ifbody->ctfeCompile(ccf);
-    if (elsebody)
-        elsebody->ctfeCompile(ccf);
-}
-
-void ScopeStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ScopeStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (statement)
-        statement->ctfeCompile(ccf);
-}
-
-void OnScopeStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s OnScopeStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // rewritten to try/catch/finally
-    assert(0);
-}
-
-void DoStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s DoStatement::ctfeCompile\n", loc.toChars());
-#endif
-    ccf->onExpression(condition);
-    if (body)
-        body->ctfeCompile(ccf);
-}
-
-void WhileStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s WhileStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // rewritten to ForStatement
-    assert(0);
-}
-
-void ForStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ForStatement::ctfeCompile\n", loc.toChars());
-#endif
-
-    if (init)
-        init->ctfeCompile(ccf);
-    if (condition)
-        ccf->onExpression(condition);
-    if (increment)
-        ccf->onExpression(increment);
-    if (body)
-        body->ctfeCompile(ccf);
-}
-
-void ForeachStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ForeachStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // rewritten for ForStatement
-    assert(0);
-}
-
-
-void SwitchStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s SwitchStatement::ctfeCompile\n", loc.toChars());
-#endif
-    ccf->onExpression(condition);
-    // Note that the body contains the the Case and Default
-    // statements, so we only need to compile the expressions
-    for (size_t i = 0; i < cases->dim; i++)
+    void visit(UnrolledLoopStatement *s)
     {
-        ccf->onExpression((*cases)[i]->exp);
+    #if LOGCOMPILE
+        printf("%s UnrolledLoopStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        for (size_t i = 0; i < s->statements->dim; i++)
+        {
+            Statement *sx = (*s->statements)[i];
+            if (sx)
+                ctfeCompile(sx);
+        }
     }
-    if (body)
-        body->ctfeCompile(ccf);
-}
 
-void CaseStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s CaseStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (statement)
-        statement->ctfeCompile(ccf);
-}
-
-void DefaultStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s DefaultStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (statement)
-        statement->ctfeCompile(ccf);
-}
-
-void GotoDefaultStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s GotoDefaultStatement::ctfeCompile\n", loc.toChars());
-#endif
-}
-
-void GotoCaseStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s GotoCaseStatement::ctfeCompile\n", loc.toChars());
-#endif
-}
-
-void SwitchErrorStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s SwitchErrorStatement::ctfeCompile\n", loc.toChars());
-#endif
-}
-
-void ReturnStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ReturnStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (exp)
-        ccf->onExpression(exp);
-}
-
-void BreakStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s BreakStatement::ctfeCompile\n", loc.toChars());
-#endif
-}
-
-void ContinueStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ContinueStatement::ctfeCompile\n", loc.toChars());
-#endif
-}
-
-void WithStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s WithStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // If it is with(Enum) {...}, just execute the body.
-    if (exp->op == TOKimport || exp->op == TOKtype)
-    {}
-    else
+    void visit(IfStatement *s)
     {
-        ccf->onDeclaration(wthis);
-        ccf->onExpression(exp);
-    }
-    if (body)
-        body->ctfeCompile(ccf);
-}
+    #if LOGCOMPILE
+        printf("%s IfStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
 
-void TryCatchStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s TryCatchStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (body)
-        body->ctfeCompile(ccf);
-    for (size_t i = 0; i < catches->dim; i++)
+        ccf->onExpression(s->condition);
+        if (s->ifbody)
+            ctfeCompile(s->ifbody);
+        if (s->elsebody)
+            ctfeCompile(s->elsebody);
+    }
+
+    void visit(ScopeStatement *s)
     {
-        Catch *ca = (*catches)[i];
-        if (ca->var)
-            ccf->onDeclaration(ca->var);
-        if (ca->handler)
-            ca->handler->ctfeCompile(ccf);
+    #if LOGCOMPILE
+        printf("%s ScopeStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->statement)
+            ctfeCompile(s->statement);
     }
-}
 
-void TryFinallyStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s TryFinallyStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (body)
-        body->ctfeCompile(ccf);
-    if (finalbody)
-        finalbody->ctfeCompile(ccf);
-}
+    void visit(OnScopeStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s OnScopeStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // rewritten to try/catch/finally
+        assert(0);
+    }
 
-void ThrowStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ThrowStatement::ctfeCompile\n", loc.toChars());
-#endif
-    ccf->onExpression(exp);
-}
+    void visit(DoStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s DoStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        ccf->onExpression(s->condition);
+        if (s->body)
+            ctfeCompile(s->body);
+    }
 
-void GotoStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s GotoStatement::ctfeCompile\n", loc.toChars());
-#endif
-}
+    void visit(WhileStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s WhileStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // rewritten to ForStatement
+        assert(0);
+    }
 
-void LabelStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s LabelStatement::ctfeCompile\n", loc.toChars());
-#endif
-    if (statement)
-        statement->ctfeCompile(ccf);
-}
+    void visit(ForStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ForStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
 
-#if DMDV2
-void ImportStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ImportStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // Contains no variables or executable code
-}
+        if (s->init)
+            ctfeCompile(s->init);
+        if (s->condition)
+            ccf->onExpression(s->condition);
+        if (s->increment)
+            ccf->onExpression(s->increment);
+        if (s->body)
+            ctfeCompile(s->body);
+    }
 
-void ForeachRangeStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s ForeachRangeStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // rewritten for ForStatement
-    assert(0);
-}
+    void visit(ForeachStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ForeachStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // rewritten for ForStatement
+        assert(0);
+    }
 
-#endif
+    void visit(SwitchStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s SwitchStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        ccf->onExpression(s->condition);
+        // Note that the body contains the the Case and Default
+        // statements, so we only need to compile the expressions
+        for (size_t i = 0; i < s->cases->dim; i++)
+        {
+            ccf->onExpression((*s->cases)[i]->exp);
+        }
+        if (s->body)
+            ctfeCompile(s->body);
+    }
 
-void AsmStatement::ctfeCompile(CompiledCtfeFunction *ccf)
-{
-#if LOGCOMPILE
-    printf("%s AsmStatement::ctfeCompile\n", loc.toChars());
-#endif
-    // we can't compile asm statements
-}
+    void visit(CaseStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s CaseStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->statement)
+            ctfeCompile(s->statement);
+    }
+
+    void visit(DefaultStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s DefaultStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->statement)
+            ctfeCompile(s->statement);
+    }
+
+    void visit(GotoDefaultStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s GotoDefaultStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+    }
+
+    void visit(GotoCaseStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s GotoCaseStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+    }
+
+    void visit(SwitchErrorStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s SwitchErrorStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+    }
+
+    void visit(ReturnStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ReturnStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->exp)
+            ccf->onExpression(s->exp);
+    }
+
+    void visit(BreakStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s BreakStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+    }
+
+    void visit(ContinueStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ContinueStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+    }
+
+    void visit(WithStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s WithStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // If it is with(Enum) {...}, just execute the body.
+        if (s->exp->op == TOKimport || s->exp->op == TOKtype)
+        {
+        }
+        else
+        {
+            ccf->onDeclaration(s->wthis);
+            ccf->onExpression(s->exp);
+        }
+        if (s->body)
+            ctfeCompile(s->body);
+    }
+
+    void visit(TryCatchStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s TryCatchStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->body)
+            ctfeCompile(s->body);
+        for (size_t i = 0; i < s->catches->dim; i++)
+        {
+            Catch *ca = (*s->catches)[i];
+            if (ca->var)
+                ccf->onDeclaration(ca->var);
+            if (ca->handler)
+                ctfeCompile(ca->handler);
+        }
+    }
+
+    void visit(TryFinallyStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s TryFinallyStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->body)
+            ctfeCompile(s->body);
+        if (s->finalbody)
+            ctfeCompile(s->finalbody);
+    }
+
+    void visit(ThrowStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ThrowStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        ccf->onExpression(s->exp);
+    }
+
+    void visit(GotoStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s GotoStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+    }
+
+    void visit(LabelStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s LabelStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        if (s->statement)
+            ctfeCompile(s->statement);
+    }
+
+    void visit(ImportStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ImportStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // Contains no variables or executable code
+    }
+
+    void visit(ForeachRangeStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s ForeachRangeStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // rewritten for ForStatement
+        assert(0);
+    }
+
+    void visit(AsmStatement *s)
+    {
+    #if LOGCOMPILE
+        printf("%s AsmStatement::ctfeCompile\n", s->loc.toChars());
+    #endif
+        // we can't compile asm statements
+    }
+
+    void ctfeCompile(Statement *s)
+    {
+        s->accept(this);
+    }
+};
 
 /*************************************
  * Compile this function for CTFE.
  * At present, this merely allocates variables.
  */
-void FuncDeclaration::ctfeCompile()
+void ctfeCompile(FuncDeclaration *fd)
 {
 #if LOGCOMPILE
-    printf("\n%s FuncDeclaration::ctfeCompile %s\n", loc.toChars(), toChars());
+    printf("\n%s FuncDeclaration::ctfeCompile %s\n", fd->loc.toChars(), fd->toChars());
 #endif
-    assert(!ctfeCode);
-    assert(!semantic3Errors);
-    assert(semanticRun == PASSsemantic3done);
+    assert(!fd->ctfeCode);
+    assert(!fd->semantic3Errors);
+    assert(fd->semanticRun == PASSsemantic3done);
 
-    ctfeCode = new CompiledCtfeFunction(this);
-    if (parameters)
+    fd->ctfeCode = new CompiledCtfeFunction(fd);
+    if (fd->parameters)
     {
-        Type *tb = type->toBasetype();
+        Type *tb = fd->type->toBasetype();
         assert(tb->ty == Tfunction);
         TypeFunction *tf = (TypeFunction *)tb;
-        for (size_t i = 0; i < parameters->dim; i++)
+        for (size_t i = 0; i < fd->parameters->dim; i++)
         {
-            Parameter *arg = Parameter::getNth(tf->parameters, i);
-            VarDeclaration *v = (*parameters)[i];
-            ctfeCode->onDeclaration(v);
+            VarDeclaration *v = (*fd->parameters)[i];
+            fd->ctfeCode->onDeclaration(v);
         }
     }
-    if (vresult)
-        ctfeCode->onDeclaration(vresult);
-    fbody->ctfeCompile(ctfeCode);
+    if (fd->vresult)
+        fd->ctfeCode->onDeclaration(fd->vresult);
+    CtfeCompiler v(fd->ctfeCode);
+    v.ctfeCompile(fd->fbody);
 }
 
 /*************************************
@@ -776,7 +813,7 @@ Expression *FuncDeclaration::interpret(InterState *istate, Expressions *argument
 
     // CTFE-compile the function
     if (!ctfeCode)
-        ctfeCompile();
+        ctfeCompile(this);
 
     Type *tb = type->toBasetype();
     assert(tb->ty == Tfunction);
@@ -858,15 +895,10 @@ Expression *FuncDeclaration::interpret(InterState *istate, Expressions *argument
                 --evaluatingArgs;
                 if (earg == EXP_CANT_INTERPRET)
                     return earg;
-#if DMDV2
                 /* Struct literals are passed by value, but we don't need to
                  * copy them if they are passed as const
                  */
-                bool needcopy = !(arg->storageClass & (STCconst | STCimmutable));
-#else
-                bool needcopy = true;
-#endif
-                if (earg->op == TOKstructliteral && needcopy)
+                if (earg->op == TOKstructliteral && !(arg->storageClass & (STCconst | STCimmutable)))
                     earg = copyLiteral(earg);
             }
             if (earg->op == TOKthrownexception)
@@ -1182,15 +1214,29 @@ bool stopPointersEscaping(Loc loc, Expression *e)
 {
     if (!e->type->hasPointers())
         return true;
-    if ( isPointer(e->type) )
+    if (isPointer(e->type))
     {
         Expression *x = e;
         if (e->op == TOKaddress)
             x = ((AddrExp *)e)->e1;
-        if (x->op == TOKvar && ((VarExp *)x)->var->isVarDeclaration() &&
-            ctfeStack.isInCurrentFrame( ((VarExp *)x)->var->isVarDeclaration() ) )
-        {   error(loc, "returning a pointer to a local stack variable");
-            return false;
+        VarDeclaration *v;
+        while (x->op == TOKvar &&
+            (v = ((VarExp *)x)->var->isVarDeclaration()) != NULL)
+        {
+            if (v->storage_class & STCref)
+            {
+                x = v->getValue();
+                if (e->op == TOKaddress)
+                    ((AddrExp *)e)->e1 = x;
+                continue;
+            }
+            if (ctfeStack.isInCurrentFrame(v))
+            {
+                error(loc, "returning a pointer to a local stack variable");
+                return false;
+            }
+            else
+                break;
         }
         // TODO: If it is a TOKdotvar or TOKindex, we should check that it is not
         // pointing to a local struct or static array.
@@ -1365,7 +1411,7 @@ Expression *ReturnStatement::interpret(InterState *istate)
     if (!exp)
         return EXP_VOID_INTERPRET;
     assert(istate && istate->fd && istate->fd->type);
-#if DMDV2
+
     /* If the function returns a ref AND it's been called from an assignment,
      * we need to return an lvalue. Otherwise, just do an (rvalue) interpret.
      */
@@ -1387,7 +1433,7 @@ Expression *ReturnStatement::interpret(InterState *istate)
             return EXP_CANT_INTERPRET;
         }
     }
-#endif
+
     // We need to treat pointers specially, because TOKsymoff can be used to
     // return a value OR a pointer
     Expression *e;
@@ -1618,13 +1664,11 @@ Expression *ForeachStatement::interpret(InterState *istate)
     return NULL;
 }
 
-#if DMDV2
 Expression *ForeachRangeStatement::interpret(InterState *istate)
 {
     assert(0);                  // rewritten to ForStatement
     return NULL;
 }
-#endif
 
 Expression *SwitchStatement::interpret(InterState *istate)
 {
@@ -1857,7 +1901,6 @@ ThrownExceptionExp *chainExceptions(ThrownExceptionExp *oldest, ThrownExceptionE
 #if LOG
     printf("Collided exceptions %s %s\n", oldest->thrown->toChars(), newest->thrown->toChars());
 #endif
-#if DMDV2
     // Little sanity check to make sure it's really a Throwable
     ClassReferenceExp *boss = oldest->thrown;
     assert((*boss->value->elements)[4]->type->ty == Tclass);
@@ -1875,10 +1918,6 @@ ThrownExceptionExp *chainExceptions(ThrownExceptionExp *oldest, ThrownExceptionE
     }
     (*boss->value->elements)[4] = collateral;
     return oldest;
-#else
-    // for D1, the newest exception just clobbers the older one
-    return newest;
-#endif
 }
 
 
@@ -2002,7 +2041,6 @@ Expression *AsmStatement::interpret(InterState *istate)
     return EXP_CANT_INTERPRET;
 }
 
-#if DMDV2
 Expression *ImportStatement::interpret(InterState *istate)
 {
 #if LOG
@@ -2016,7 +2054,6 @@ Expression *ImportStatement::interpret(InterState *istate)
 ;
     return NULL;
 }
-#endif
 
 /******************************** Expression ***************************/
 
@@ -2307,7 +2344,6 @@ Expression *getVarExp(Loc loc, InterState *istate, Declaration *d, CtfeGoal goal
     SymbolDeclaration *s = d->isSymbolDeclaration();
     if (v)
     {
-#if DMDV2
         /* Magic variable __ctfe always returns true when interpreting
          */
         if (v->ident == Id::ctfe)
@@ -2320,12 +2356,9 @@ Expression *getVarExp(Loc loc, InterState *istate, Declaration *d, CtfeGoal goal
                 return EXP_CANT_INTERPRET;
         }
 
-        bool doinit = (v->isConst() || v->isImmutable() || v->storage_class & STCmanifest)
-                      && !v->hasValue();
-#else
-        bool doinit = v->isConst();
-#endif
-        if (doinit && v->init && !v->isCTFE())
+        if ((v->isConst() || v->isImmutable() || v->storage_class & STCmanifest) &&
+            !v->hasValue() &&
+            v->init && !v->isCTFE())
         {
             if(v->scope)
                 v->init = v->init->semantic(v->scope, v->type, INITinterpret); // might not be run on aggregate members
@@ -2513,11 +2546,6 @@ Expression *DeclarationExp::interpret(InterState *istate, CtfeGoal goal)
         if (!(v->isDataseg() || v->storage_class & STCmanifest) || v->isCTFE())
             ctfeStack.push(v);
         Dsymbol *s = v->toAlias();
-#if DMDV2
-        bool constinit = (v->isConst() || v->isImmutable());
-#else
-        bool constinit = v->isConst();
-#endif
         if (s == v && !v->isStatic() && v->init)
         {
             ExpInitializer *ie = v->init->isExpInitializer();
@@ -2540,7 +2568,7 @@ Expression *DeclarationExp::interpret(InterState *istate, CtfeGoal goal)
         {   // Zero-length arrays don't need an initializer
             e = v->type->defaultInitLiteral(loc);
         }
-        else if (s == v && constinit && v->init)
+        else if (s == v && (v->isConst() || v->isImmutable()) && v->init)
         {   e = v->init->toExpression();
             if (!e)
                 e = EXP_CANT_INTERPRET;
@@ -2690,12 +2718,10 @@ Expression *ArrayLiteralExp::interpret(InterState *istate, CtfeGoal goal)
         ae->type = type;
         return copyLiteral(ae);
     }
-#if DMDV2
     if (((TypeNext *)type)->next->mod & (MODconst | MODimmutable))
     {   // If it's immutable, we don't need to dup it
         return this;
     }
-#endif
     return copyLiteral(this);
 }
 
@@ -2913,7 +2939,6 @@ Expression *NewExp::interpret(InterState *istate, CtfeGoal goal)
     if (newtype->toBasetype()->ty == Tstruct)
     {
         Expression *se = newtype->defaultInitLiteral(loc);
-#if DMDV2
         if (member)
         {
             int olderrors = global.errors;
@@ -2924,10 +2949,6 @@ Expression *NewExp::interpret(InterState *istate, CtfeGoal goal)
                 return EXP_CANT_INTERPRET;
             }
         }
-#else   // The above code would fail on D1 because it doesn't use STRUCTTHISREF,
-        // but that's OK because D1 doesn't have struct constructors anyway.
-        assert(!member);
-#endif
         Expression *e = new AddrExp(loc, copyLiteral(se));
         e->type = type;
         return e;
@@ -3164,9 +3185,7 @@ Expression *BinExp::interpret(InterState *istate, CtfeGoal goal)
     case TOKand:  return interpretCommon(istate, goal, &And);
     case TOKor:   return interpretCommon(istate, goal, &Or);
     case TOKxor:  return interpretCommon(istate, goal, &Xor);
-#if DMDV2
     case TOKpow:  return interpretCommon(istate, goal, &Pow);
-#endif
     case TOKequal:
     case TOKnotequal:
         return interpretCompareCommon(istate, goal, &ctfeEqual);
@@ -3254,17 +3273,11 @@ Expression *BinExp::interpretAssignCommon(InterState *istate, CtfeGoal goal, fp_
     {
         // a[] = e can have const e. So we compare the naked types.
         Type *desttype = e1->type->toBasetype();
-#if DMDV2
         Type *srctype = e2->type->toBasetype()->castMod(0);
-#else
-        Type *srctype = e2->type->toBasetype();
-#endif
         while ( desttype->ty == Tsarray || desttype->ty == Tarray)
         {
             desttype = ((TypeArray *)desttype)->next;
-#if DMDV2
             desttype = desttype->toBasetype()->castMod(0);
-#endif
             if (srctype->equals(desttype))
             {
                 isBlockAssignment = true;
@@ -3291,24 +3304,7 @@ Expression *BinExp::interpretAssignCommon(InterState *istate, CtfeGoal goal, fp_
          && this->e2->op != TOKstar
         )
     {
-#if DMDV2
         wantRef = true;
-#else
-        /* D1 doesn't have const in the type system. But there is still a
-         * vestigal const in the form of static const variables.
-         * Problematic code like:
-         *    const int [] x = [1,2,3];
-         *    int [] y = x;
-         * can be dealt with by making this a non-ref assign (y = x.dup).
-         * Otherwise it's a big mess.
-         */
-        VarDeclaration * targetVar = findParentVar(e2);
-        if (!(targetVar && targetVar->isConst()))
-            wantRef = true;
-        // slice assignment of static arrays is not reference assignment
-        if ((e1->op==TOKslice) && ((SliceExp *)e1)->e1->type->ty == Tsarray)
-            wantRef = false;
-#endif
         // If it is assignment from a ref parameter, it's not a ref assignment
         if (this->e2->op == TOKvar)
         {
@@ -4313,20 +4309,17 @@ Expression *interpretAssignToSlice(InterState *istate, CtfeGoal goal, Loc loc,
         Expressions * w = existingAE->elements;
         assert( existingAE->type->ty == Tsarray ||
                 existingAE->type->ty == Tarray);
-#if DMDV2
         Type *desttype = ((TypeArray *)existingAE->type)->next->toBasetype()->castMod(0);
         bool directblk = (e2->type->toBasetype()->castMod(0))->equals(desttype);
-#else
-        Type *desttype = ((TypeArray *)existingAE->type)->next;
-        bool directblk = (e2->type->toBasetype())->equals(desttype);
-#endif
         bool cow = !(newval->op == TOKstructliteral || newval->op == TOKarrayliteral
             || newval->op == TOKstring);
         for (size_t j = 0; j < upperbound-lowerbound; j++)
         {
             if (!directblk)
+            {
                 // Multidimensional array block assign
                 recursiveBlockAssign((ArrayLiteralExp *)(*w)[(size_t)(j+firstIndex)], newval, wantRef);
+            }
             else
             {
                 if (wantRef || cow)
@@ -4371,9 +4364,7 @@ Expression *BinAssignExp::interpret(InterState *istate, CtfeGoal goal)
     case TOKandass:  return interpretAssignCommon(istate, goal, &And);
     case TOKorass:   return interpretAssignCommon(istate, goal, &Or);
     case TOKxorass:  return interpretAssignCommon(istate, goal, &Xor);
-#if DMDV2
     case TOKpowass:  return interpretAssignCommon(istate, goal, &Pow);
-#endif
     default:
         assert(0);
         return NULL;
@@ -4896,8 +4887,6 @@ Expression *CallExp::interpret(InterState *istate, CtfeGoal goal)
         }
         return e;
     }
-    if (fd->dArrayOp)
-        return fd->dArrayOp->interpret(istate, arguments, pthis);
     if (!fd->fbody)
     {
         error("%s cannot be interpreted at compile time,"
@@ -5463,13 +5452,6 @@ Expression *CastExp::interpret(InterState *istate, CtfeGoal goal)
     {
         Type *pointee = ((TypePointer *)type)->next;
         // Implement special cases of normally-unsafe casts
-#if DMDV2
-        if (pointee->ty == Taarray && e1->op == TOKaddress
-            && isAssocArray(((AddrExp*)e1)->e1->type))
-        {   // cast from template AA pointer to true AA pointer is OK.
-            return paintTypeOntoLiteral(to, e1);
-        }
-#endif
         if (e1->op == TOKint64)
         {   // Happens with Windows HANDLEs, for example.
             return paintTypeOntoLiteral(to, e1);
@@ -5630,21 +5612,7 @@ Expression *AssertExp::interpret(InterState *istate, CtfeGoal goal)
 #if LOG
     printf("%s AssertExp::interpret() %s\n", loc.toChars(), toChars());
 #endif
-#if DMDV2
     e1 = this->e1->interpret(istate);
-#else
-    // Deal with pointers (including compiler-inserted assert(&this, "null this"))
-    if ( isPointer(this->e1->type) )
-    {
-        e1 = this->e1->interpret(istate, ctfeNeedLvalue);
-        if (exceptionOrCantInterpret(e1))
-            return e1;
-        if (e1->op != TOKnull)
-            return new IntegerExp(loc, 1, Type::tbool);
-    }
-    else
-        e1 = this->e1->interpret(istate);
-#endif
     if (exceptionOrCantInterpret(e1))
         return e1;
     if (isTrueBool(e1))
@@ -5715,15 +5683,6 @@ Expression *PtrExp::interpret(InterState *istate, CtfeGoal goal)
     }
     else
     {
-#if DMDV2
-#else // this is required for D1, where structs return *this instead of 'this'.
-        if (e1->op == TOKthis)
-        {
-            if (ctfeStack.getThis())
-                return ctfeStack.getThis()->interpret(istate);
-            goto Ldone;
-        }
-#endif
         // Check for .classinfo, which is lowered in the semantic pass into **(class).
         if (e1->op == TOKstar && e1->type->ty == Tpointer && isTypeInfo_Class(e1->type->nextOf()))
         {
@@ -5881,13 +5840,6 @@ Expression *DotVarExp::interpret(InterState *istate, CtfeGoal goal)
         return ex;
     if (ex != EXP_CANT_INTERPRET)
     {
-        #if DMDV2
-        // Special case for template AAs: AA.var returns the AA itself.
-        //  ie AA.p  ----> AA. This is a hack, to get around the
-        // corresponding hack in the AA druntime implementation.
-        if (isAssocArray(ex->type))
-            return ex;
-        #endif
         if (ex->op == TOKaddress)
             ex = ((AddrExp *)ex)->e1;
 
@@ -5921,13 +5873,6 @@ Expression *DotVarExp::interpret(InterState *istate, CtfeGoal goal)
                 se = (StructLiteralExp *)ex;
                 i  = findFieldIndexByName(se->sd, v);
             }
-#if DMDV1
-            if (se->sd->hasUnions)
-            {
-                error("Unions with overlapping fields are not yet supported in CTFE");
-                return EXP_CANT_INTERPRET;
-            }
-#endif
             if (i == -1)
             {
                 error("couldn't find field %s of type %s in %s", v->toChars(), type->toChars(), se->toChars());
@@ -5970,13 +5915,11 @@ Expression *DotVarExp::interpret(InterState *istate, CtfeGoal goal)
             {
                 VoidInitExp *ve = (VoidInitExp *)e;
                 const char *s = ve->var->toChars();
-#if DMDV2
                 if (v->overlapped)
                 {
                     error("Reinterpretation through overlapped field %s is not allowed in CTFE", s);
                     return EXP_CANT_INTERPRET;
                 }
-#endif
                 error("cannot read uninitialized variable %s in CTFE", s);
                 return EXP_CANT_INTERPRET;
             }
@@ -6418,18 +6361,6 @@ Expression *evaluateIfBuiltin(InterState *istate, Loc loc,
 {
     Expression *e = NULL;
     size_t nargs = arguments ? arguments->dim : 0;
-#if DMDV2
-    if (pthis && isAssocArray(pthis->type))
-    {
-        if (fd->ident == Id::length &&  nargs==0)
-            return interpret_length(istate, pthis);
-        else if (fd->ident == Id::keys && nargs==0)
-            return interpret_keys(istate, pthis, returnedArrayType(fd));
-        else if (fd->ident == Id::values && nargs==0)
-            return interpret_values(istate, pthis, returnedArrayType(fd));
-        else if (fd->ident == Id::rehash && nargs==0)
-            return pthis->interpret(istate, ctfeNeedLvalue);  // rehash is a no-op
-    }
     if (!pthis)
     {
         if (fd->isBuiltin() == BUILTINyes)
@@ -6451,17 +6382,6 @@ Expression *evaluateIfBuiltin(InterState *istate, Loc loc,
             }
         }
     }
-
-    if (!pthis)
-    {
-        Expression *firstarg =  nargs > 0 ? (Expression *)(arguments->data[0]) : NULL;
-        if (nargs==3 && isAssocArray(firstarg->type) && !strcmp(fd->ident->string, "_aaApply"))
-            return interpret_aaApply(istate, firstarg, (Expression *)(arguments->data[2]));
-        if (nargs==3 && isAssocArray(firstarg->type) &&!strcmp(fd->ident->string, "_aaApply2"))
-            return interpret_aaApply(istate, firstarg, (Expression *)(arguments->data[2]));
-    }
-#endif
-#if DMDV1
     if (!pthis)
     {
         Expression *firstarg =  nargs > 0 ? (Expression *)(arguments->data[0]) : NULL;
@@ -6470,20 +6390,18 @@ Expression *evaluateIfBuiltin(InterState *istate, Loc loc,
             TypeAArray *firstAAtype = (TypeAArray *)firstarg->type;
             if (fd->ident == Id::aaLen && nargs == 1)
                 return interpret_length(istate, firstarg);
-            else if (fd->ident == Id::aaKeys)
-                return interpret_keys(istate, firstarg, new DArray(firstAAtype->index));
-            else if (fd->ident == Id::aaValues)
-                return interpret_values(istate, firstarg, new DArray(firstAAtype->nextOf()));
-            else if (nargs==2 && fd->ident == Id::aaRehash)
-                return firstarg->interpret(istate, ctfeNeedLvalue); //no-op
             else if (nargs==3 && !strcmp(fd->ident->string, "_aaApply"))
                 return interpret_aaApply(istate, firstarg, (Expression *)(arguments->data[2]));
             else if (nargs==3 && !strcmp(fd->ident->string, "_aaApply2"))
                 return interpret_aaApply(istate, firstarg, (Expression *)(arguments->data[2]));
+            else if (nargs==1 && !strcmp(fd->ident->string, "keys") && !strcmp(fd->toParent2()->ident->string, "object"))
+                return interpret_keys(istate, firstarg, firstAAtype->index->arrayOf());
+            else if (nargs==1 && !strcmp(fd->ident->string, "values") && !strcmp(fd->toParent2()->ident->string, "object"))
+                return interpret_values(istate, firstarg, firstAAtype->nextOf()->arrayOf());
+            else if (nargs==1 && !strcmp(fd->ident->string, "rehash") && !strcmp(fd->toParent2()->ident->string, "object"))
+                return firstarg->interpret(istate, ctfeNeedLvalue);
         }
     }
-#endif
-#if DMDV2
     if (pthis && !fd->fbody && fd->isCtorDeclaration() && fd->parent && fd->parent->parent && fd->parent->parent->ident == Id::object)
     {
         if (pthis->op == TOKclassreference && fd->parent->ident == Id::Throwable)
@@ -6501,7 +6419,6 @@ Expression *evaluateIfBuiltin(InterState *istate, Loc loc,
             return EXP_VOID_INTERPRET;
         }
     }
-#endif
     if (nargs == 1 && !pthis &&
         (fd->ident == Id::criticalenter || fd->ident == Id::criticalexit))
     {   // Support synchronized{} as a no-op

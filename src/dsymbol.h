@@ -137,8 +137,7 @@ public:
     bool errors;                // this symbol failed to pass semantic()
     PASS semanticRun;
     char *depmsg;               // customized deprecation message
-    Expressions *userAttributes;        // user defined attributes from UserAttributeDeclaration
-    Scope *userAttributesScope;
+    UserAttributeDeclaration *userAttribDecl;   // user defined attributes
     UnitTestDeclaration *ddocUnittest; // !=NULL means there's a ddoc unittest associated with this symbol (only use this with ddoc)
 
     Dsymbol();
@@ -163,7 +162,8 @@ public:
     TemplateInstance *isSpeculative();
     Ungag ungagSpeculative();
 
-    int dyncast() { return DYNCAST_DSYMBOL; }   // kludge for template.isSymbol()
+    // kludge for template.isSymbol()
+    int dyncast() { return DYNCAST_DSYMBOL; }
 
     static Dsymbols *arraySyntaxCopy(Dsymbols *a);
 
@@ -178,7 +178,6 @@ public:
     virtual void semantic(Scope *sc);
     virtual void semantic2(Scope *sc);
     virtual void semantic3(Scope *sc);
-    virtual void inlineScan();
     virtual Dsymbol *search(Loc loc, Identifier *ident, int flags = IgnoreNone);
     Dsymbol *search_correct(Identifier *id);
     Dsymbol *searchX(Loc loc, Scope *sc, RootObject *id);

@@ -3936,6 +3936,23 @@ static assert( is(typeof(compiles!(test7876(11)))));
 static assert(!is(typeof(compiles!(test7876(10)))));
 
 /**************************************************
+    11824
+**************************************************/
+
+int f11824(T)()
+{
+    T[] arr = new T[](1);
+    T* getAddr(ref T a)
+    {
+        return &a;
+    }
+    getAddr(arr[0]);
+    return 1;
+}
+static assert(f11824!int());        // OK
+static assert(f11824!(int[])());    // OK <- NG
+
+/**************************************************
     6817 if converted to &&, only with -inline
 **************************************************/
 static assert({
@@ -4138,6 +4155,22 @@ int classtest3()
 }
 
 static assert(classtest3());
+
+/**************************************************
+    12016 class cast and qualifier reinterpret
+**************************************************/
+
+class B12016 { }
+
+class C12016 : B12016 { }
+
+bool f12016(immutable B12016 b)
+{
+    assert(b);
+    return true;
+}
+
+static assert(f12016(new immutable C12016));
 
 /**************************************************
     11587 AA compare

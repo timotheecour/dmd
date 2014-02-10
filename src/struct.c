@@ -22,6 +22,8 @@
 #include "statement.h"
 #include "template.h"
 
+TypeTuple *toArgTypes(Type *t);
+
 FuncDeclaration *StructDeclaration::xerreq;     // object.xopEquals
 FuncDeclaration *StructDeclaration::xerrcmp;    // object.xopCmp
 
@@ -119,7 +121,8 @@ void AggregateDeclaration::semantic2(Scope *sc)
 {
     //printf("AggregateDeclaration::semantic2(%s)\n", toChars());
     if (scope && members)
-    {   error("has forward references");
+    {
+        error("has forward references");
         return;
     }
     if (members)
@@ -215,20 +218,20 @@ void AggregateDeclaration::semantic3(Scope *sc)
             {
                 ftohash->semantic3(ftohash->scope);
             }
-        }
-    }
-}
 
-void AggregateDeclaration::inlineScan()
-{
-    //printf("AggregateDeclaration::inlineScan(%s)\n", toChars());
-    if (members)
-    {
-        for (size_t i = 0; i < members->dim; i++)
-        {
-            Dsymbol *s = (*members)[i];
-            //printf("inline scan aggregate symbol '%s'\n", s->toChars());
-            s->inlineScan();
+            if (sd->postblit &&
+                sd->postblit->scope &&
+                sd->postblit->semanticRun < PASSsemantic3done)
+            {
+                sd->postblit->semantic3(sd->postblit->scope);
+            }
+
+            if (sd->dtor &&
+                sd->dtor->scope &&
+                sd->dtor->semanticRun < PASSsemantic3done)
+            {
+                sd->dtor->semantic3(sd->dtor->scope);
+            }
         }
     }
 }
@@ -311,11 +314,14 @@ bool AggregateDeclaration::isExport()
 /****************************
  * Do byte or word alignment as necessary.
  * Align sizes of 0, as we may not know array sizes yet.
+ *
+ * alignment: struct alignment that is in effect
+ * size: alignment requirement of field
  */
 
 void AggregateDeclaration::alignmember(
-        structalign_t alignment,   // struct alignment that is in effect
-        unsigned size,             // alignment requirement of field
+        structalign_t alignment,
+        unsigned size,
         unsigned *poffset)
 {
     //printf("alignment = %d, size = %d, offset = %d\n",alignment,size,offset);
@@ -347,15 +353,23 @@ void AggregateDeclaration::alignmember(
  * Place a member (mem) into an aggregate (agg), which can be a struct, union or class
  * Returns:
  *      offset to place field at
+ *
+ * nextoffset:    next location in aggregate
+ * memsize:       size of member
+ * memalignsize:  size of member for alignment purposes
+ * alignment:     alignment in effect for this member
+ * paggsize:      size of aggregate (updated)
+ * paggalignsize: size of aggregate for alignment purposes (updated)
+ * isunion:       the aggregate is a union
  */
 unsigned AggregateDeclaration::placeField(
-        unsigned *nextoffset,   // next location in aggregate
-        unsigned memsize,       // size of member
-        unsigned memalignsize,  // size of member for alignment purposes
-        structalign_t alignment, // alignment in effect for this member
-        unsigned *paggsize,     // size of aggregate (updated)
-        unsigned *paggalignsize, // size of aggregate for alignment purposes (updated)
-        bool isunion            // the aggregate is a union
+        unsigned *nextoffset,
+        unsigned memsize,
+        unsigned memalignsize,
+        structalign_t alignment,
+        unsigned *paggsize,
+        unsigned *paggalignsize,
+        bool isunion
         )
 {
     unsigned ofs = *nextoffset;
@@ -605,12 +619,7 @@ void StructDeclaration::semantic(Scope *sc)
     assert(!isAnonymous());
     if (sc->stc & STCabstract)
         error("structs, unions cannot be abstract");
-    userAttributes = sc->userAttributes;
-    if (userAttributes)
-    {
-        userAttributesScope = sc;
-        userAttributesScope->setNoFree();
-    }
+    userAttribDecl = sc->userAttribDecl;
 
     if (sizeok == SIZEOKnone)            // if not already done the addMember step
     {
@@ -631,7 +640,7 @@ void StructDeclaration::semantic(Scope *sc)
     sc2->protection = PROTpublic;
     sc2->explicitProtection = 0;
     sc2->structalign = STRUCTALIGN_DEFAULT;
-    sc2->userAttributes = NULL;
+    sc2->userAttribDecl = NULL;
 
     /* Set scope so if there are forward references, we still might be able to
      * resolve individual members like enums.
@@ -744,7 +753,7 @@ void StructDeclaration::semantic(Scope *sc)
     aggNew =       (NewDeclaration *)search(Loc(), Id::classNew);
     aggDelete = (DeleteDeclaration *)search(Loc(), Id::classDelete);
 
-    TypeTuple *tup = type->toArgTypes();
+    TypeTuple *tup = toArgTypes(type);
     size_t dim = tup->arguments->dim;
     if (dim >= 1)
     {   assert(dim <= 2);

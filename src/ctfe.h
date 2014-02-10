@@ -49,7 +49,6 @@ public:
     /// Return index of the field, or -1 if not found
     /// Same as getFieldIndex, but checks for a direct match with the VarDeclaration
     int findFieldIndexByName(VarDeclaration *v);
-    dt_t **toDt(dt_t **pdt);
     dt_t **toDtI(dt_t **pdt, int offset);
     Symbol* toSymbol();
     dt_t **toInstanceDt(dt_t **pdt);
@@ -196,7 +195,7 @@ bool isFloatIntPaint(Type *to, Type *from);
 // Reinterpret float/int value 'fromVal' as a float/integer of type 'to'.
 Expression *paintFloatInt(Expression *fromVal, Type *to);
 
-/// Return true if t is an AA, or AssociativeArray!(key, value)
+/// Return true if t is an AA
 bool isAssocArray(Type *t);
 
 /// Given a template AA type, extract the corresponding built-in AA type

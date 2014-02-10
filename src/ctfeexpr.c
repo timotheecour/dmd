@@ -305,11 +305,7 @@ Expression *copyLiteral(Expression *e)
                 m = copyLiteral(m);
             (*newelems)[i] = m;
         }
-#if DMDV2
         StructLiteralExp *r = new StructLiteralExp(e->loc, se->sd, newelems, se->stype);
-#else
-        StructLiteralExp *r = new StructLiteralExp(e->loc, se->sd, newelems);
-#endif
         r->type = e->type;
         r->ownedByCtfe = true;
         r->origin = ((StructLiteralExp*)e)->origin;
@@ -336,12 +332,8 @@ Expression *copyLiteral(Expression *e)
             r = new IndexExp(e->loc, ((IndexExp *)e)->e1, ((IndexExp *)e)->e2);
         else if (e->op == TOKdotvar)
         {
-#if DMDV2
             r = new DotVarExp(e->loc, ((DotVarExp *)e)->e1,
                 ((DotVarExp *)e)->var, ((DotVarExp *)e)->hasOverloads);
-#else
-            r = new DotVarExp(e->loc, ((DotVarExp *)e)->e1, ((DotVarExp *)e)->var);
-#endif
         }
         else
             assert(0);
@@ -516,23 +508,12 @@ StringExp *createBlockDuplicatedStringLiteral(Loc loc, Type *type,
     return se;
 }
 
-// Return true if t is an AA, or AssociativeArray!(key, value)
+// Return true if t is an AA
 bool isAssocArray(Type *t)
 {
     t = t->toBasetype();
     if (t->ty == Taarray)
         return true;
-#if DMDV2
-    if (t->ty != Tstruct)
-        return false;
-    StructDeclaration *sym = ((TypeStruct *)t)->sym;
-    if (sym->ident == Id::AssociativeArray && sym->parent &&
-        sym->parent->parent &&
-        sym->parent->parent->ident == Id::object)
-    {
-        return true;
-    }
-#endif
     return false;
 }
 
@@ -542,17 +523,8 @@ TypeAArray *toBuiltinAAType(Type *t)
     t = t->toBasetype();
     if (t->ty == Taarray)
         return (TypeAArray *)t;
-#if DMDV2
-    assert(t->ty == Tstruct);
-    StructDeclaration *sym = ((TypeStruct *)t)->sym;
-    assert(sym->ident == Id::AssociativeArray);
-    TemplateInstance *ti = sym->parent->isTemplateInstance();
-    assert(ti);
-    return new TypeAArray((Type *)(*ti->tiargs)[1], (Type *)(*ti->tiargs)[0]);
-#else
     assert(0);
     return NULL;
-#endif
 }
 
 /************** TypeInfo operations ************************************/
@@ -594,11 +566,9 @@ bool isSafePointerCast(Type *srcPointee, Type *destPointee)
         destPointee = destPointee->nextOf();
     }
 
-#if DMDV2
    // It's OK if both are the same (modulo const)
     srcPointee = srcPointee->castMod(0);
     destPointee = destPointee->castMod(0);
-#endif
     if (srcPointee == destPointee)
         return true;
 
@@ -608,6 +578,10 @@ bool isSafePointerCast(Type *srcPointee, Type *destPointee)
 
     // it's OK to cast to void*
     if (destPointee->ty == Tvoid)
+        return true;
+
+    // It's OK to cast from V[K] to void*
+    if (srcPointee->ty == Taarray && destPointee == Type::tvoidptr)
         return true;
 
     // It's OK if they are the same size (static array of) integers, eg:
@@ -1754,10 +1728,11 @@ Expression *ctfeCast(Loc loc, Type *type, Type *to, Expression *e)
     if (e->op == TOKnull)
         return paintTypeOntoLiteral(to, e);
     if (e->op == TOKclassreference)
-    {   // Disallow reinterpreting class casts. Do this by ensuring that
+    {
+        // Disallow reinterpreting class casts. Do this by ensuring that
         // the original class can implicitly convert to the target class
         ClassDeclaration *originalClass = ((ClassReferenceExp *)e)->originalClass();
-        if (originalClass->type->implicitConvTo(to))
+        if (originalClass->type->implicitConvTo(to->mutableOf()))
             return paintTypeOntoLiteral(to, e);
         else
             return new NullExp(loc, to);
@@ -1765,12 +1740,10 @@ Expression *ctfeCast(Loc loc, Type *type, Type *to, Expression *e)
     // Allow TypeInfo type painting
     if (isTypeInfo_Class(e->type) && e->type->implicitConvTo(to))
         return paintTypeOntoLiteral(to, e);
-#if DMDV2
     // Allow casting away const for struct literals
     if (e->op == TOKstructliteral &&
         e->type->toBasetype()->castMod(0) == to->toBasetype()->castMod(0))
         return paintTypeOntoLiteral(to, e);
-#endif
     Expression *r = Cast(type, to, e);
     if (r == EXP_CANT_INTERPRET)
         error(loc, "cannot cast %s to %s at compile time", e->toChars(), to->toChars());
@@ -1848,13 +1821,8 @@ void assignInPlace(Expression *dest, Expression *src)
 void recursiveBlockAssign(ArrayLiteralExp *ae, Expression *val, bool wantRef)
 {
     assert( ae->type->ty == Tsarray || ae->type->ty == Tarray);
-#if DMDV2
     Type *desttype = ((TypeArray *)ae->type)->next->toBasetype()->castMod(0);
     bool directblk = (val->type->toBasetype()->castMod(0))->equals(desttype);
-#else
-    Type *desttype = ((TypeArray *)ae->type)->next;
-    bool directblk = (val->type->toBasetype())->equals(desttype);
-#endif
 
     bool cow = !(val->op == TOKstructliteral || val->op == TOKarrayliteral
         || val->op == TOKstring);
@@ -2007,12 +1975,7 @@ Expression *changeArrayLiteralLength(Loc loc, TypeArray *arrayType,
 
 bool isCtfeValueValid(Expression *newval)
 {
-#if DMDV2
-    bool isnull = newval->type->ty == Tnull;
-#else
-    bool isnull = false;
-#endif
-    if (isnull || isPointer(newval->type))
+    if (newval->type->ty == Tnull || isPointer(newval->type))
     {
         if (newval->op == TOKaddress || newval->op == TOKnull ||
             newval->op == TOKstring)

@@ -51,8 +51,7 @@ Dsymbol::Dsymbol()
     this->semanticRun = PASSinit;
     this->errors = false;
     this->depmsg = NULL;
-    this->userAttributes = NULL;
-    this->userAttributesScope = NULL;
+    this->userAttribDecl = NULL;
     this->ddocUnittest = NULL;
 }
 
@@ -69,8 +68,7 @@ Dsymbol::Dsymbol(Identifier *ident)
     this->semanticRun = PASSinit;
     this->errors = false;
     this->depmsg = NULL;
-    this->userAttributes = NULL;
-    this->userAttributesScope = NULL;
+    this->userAttribDecl = NULL;
     this->ddocUnittest = NULL;
 }
 
@@ -348,8 +346,9 @@ void Dsymbol::setScope(Scope *sc)
     scope = sc;
     if (sc->depmsg)
         depmsg = sc->depmsg;
-    if (userAttributes)
-        userAttributesScope = sc;
+
+    if (!userAttribDecl)
+        userAttribDecl = sc->userAttribDecl;
 }
 
 void Dsymbol::importAll(Scope *sc)
@@ -381,15 +380,6 @@ void Dsymbol::semantic2(Scope *sc)
 void Dsymbol::semantic3(Scope *sc)
 {
     // Most Dsymbols have no further semantic analysis needed
-}
-
-/*************************************
- * Look for function inlining possibilities.
- */
-
-void Dsymbol::inlineScan()
-{
-    // Most Dsymbols aren't functions
 }
 
 /*********************************************
@@ -750,10 +740,12 @@ Module *Dsymbol::getAccessModule()
             return m;
         TemplateInstance *ti = s->isTemplateInstance();
         if (ti && ti->enclosing)
+        {
             /* Because of local template instantiation, the parent isn't where the access
              * rights come from - it's the template declaration
              */
             s = ti->tempdecl;
+        }
         else
             s = s->parent;
     }
@@ -1287,10 +1279,7 @@ Dsymbol *WithScopeSymbol::search(Loc loc, Identifier *ident, int flags)
         else
         {
             Type *t = e->type->toBasetype();
-            if (t->ty == Taarray)
-                s = ((TypeAArray *)t)->getImpl();
-            else
-                s = t->toDsymbol(NULL);
+            s = t->toDsymbol(NULL);
         }
         if (s)
         {
@@ -1461,15 +1450,11 @@ Dsymbol *ArrayScopeSymbol::search(Loc loc, Identifier *ident, int flags)
                         dim = 0; // slices are currently always one-dimensional
                     }
 
-                    Objects *tdargs = new Objects();
+                    Objects *tiargs = new Objects();
                     Expression *edim = new IntegerExp(Loc(), dim, Type::tsize_t);
                     edim = edim->semantic(sc);
-                    tdargs->push(edim);
-
-                    //TemplateInstance *ti = new TemplateInstance(loc, td, tdargs);
-                    //ti->semantic(sc);
-
-                    e = new DotTemplateInstanceExp(loc, ce, td->ident, tdargs);
+                    tiargs->push(edim);
+                    e = new DotTemplateInstanceExp(loc, ce, td->ident, tiargs);
                 }
                 else
                 {   /* opDollar exists, but it's not a template.

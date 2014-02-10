@@ -47,6 +47,8 @@ void printCtfePerformanceStats();
 
 static bool parse_arch(size_t argc, const char** argv, bool is64bit);
 
+void inlineScan(Module *m);
+
 /** Normalize path by turning forward slashes into backslashes */
 void toWinPath(char *src)
 {
@@ -746,7 +748,8 @@ Language changes listed by -transition=id:\n\
                         num = strtol(p + 12, (char **)&p, 10);
                         if (*p || errno || num > INT_MAX)
                             goto Lerror;
-                        switch (num)    // Bugzilla issue number
+                        // Bugzilla issue number
+                        switch (num)
                         {
                             case 3449:
                                 global.params.vfield = 1;
@@ -1279,7 +1282,6 @@ Language changes listed by -transition=id:\n\
     bool firstmodule = true;
     for (size_t i = 0; i < files.dim; i++)
     {
-        ;
         const char *name;
 
         const char *p = files[i];
@@ -1606,7 +1608,7 @@ Language changes listed by -transition=id:\n\
             Module *m = modules[i];
             if (global.params.verbose)
                 fprintf(global.stdmsg, "inline scan %s\n", m->toChars());
-            m->inlineScan();
+            inlineScan(m);
         }
     }
 
