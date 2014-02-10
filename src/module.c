@@ -111,7 +111,7 @@ Module::Module(const char *filename, Identifier *ident, int doDocComment, int do
     }
     srcfile = new File(srcfilename);
 
-    objfile = setOutfile(global.params.objname, global.params.objdir, filename, global.obj_ext);
+    objfile = NULL;
 
     symfilename = FileName::forceExt(filename, global.sym_ext);
 
@@ -123,6 +123,10 @@ Module::Module(const char *filename, Identifier *ident, int doDocComment, int do
 
     //objfile = new File(objfilename);
     symfile = new File(symfilename);
+}
+
+void Module::updateAfterParse(){
+    objfile = setOutfile(global.params.objname, global.params.objdir, arg, global.obj_ext);
 }
 
 Module *Module::create(const char *filename, Identifier *ident, int doDocComment, int doHdrGen)
@@ -161,6 +165,20 @@ File *Module::setOutfile(const char *name, const char *dir, const char *arg, con
             argdoc = arg;
         else
             argdoc = FileName::name(arg);
+
+        if(global.params.fqNames){
+            char *name = md ? md->toChars() : toChars();
+            argdoc = FileName::replaceName((char*)argdoc, name);
+            // add ext, otherwise forceExt will make nested.module into nested.bc
+            size_t len = strlen(argdoc);
+            size_t extlen = strlen(ext);
+            char* s = (char *)alloca(len + 1 + extlen + 1);
+            memcpy(s, argdoc, len);
+            s[len] = '.';
+            memcpy(s + len + 1, ext, extlen + 1);
+            s[len+1+extlen] = 0;
+            argdoc = s;
+        }
 
         // If argdoc doesn't have an absolute path, make it relative to dir
         if (!FileName::absolute(argdoc))
@@ -247,6 +265,7 @@ Module *Module::load(Loc loc, Identifiers *packages, Identifier *ident)
         return NULL;
 
     m->parse();
+    m->updateAfterParse();
 
 #ifdef IN_GCC
     d_gcc_magic_module(m);

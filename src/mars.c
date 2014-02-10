@@ -437,6 +437,7 @@ Usage:\n\
   -odobjdir      write object & library files to directory objdir\n\
   -offilename    name output file to filename\n\
   -op            preserve source path for output files\n\
+  -oq            write object files with fully qualified names\n\
   -profile       profile runtime performance of generated code\n\
   -property      enforce property syntax\n\
   -quiet         suppress unnecessary messages\n\
@@ -801,6 +802,12 @@ Language changes listed by -transition=id:\n\
                         if (p[3])
                             goto Lerror;
                         global.params.preservePaths = 1;
+                        break;
+
+                    case 'q':
+                        if (p[3])
+                            goto Lerror;
+                        global.params.fqNames = 1;
                         break;
 
                     case 0:
@@ -1380,11 +1387,6 @@ Language changes listed by -transition=id:\n\
         Identifier *id = Lexer::idPool(name);
         Module *m = new Module(files[i], id, global.params.doDocComments, global.params.doHdrGeneration);
         modules.push(m);
-
-        if (firstmodule)
-        {   global.params.objfiles->push(m->objfile->name->str);
-            firstmodule = false;
-        }
     }
 
     // Read files
@@ -1437,16 +1439,24 @@ Language changes listed by -transition=id:\n\
         if (!Module::rootModule)
             Module::rootModule = m;
         m->importedFrom = m;    // m->isRoot() == true
-        if (!global.params.oneobj || modi == 0 || m->isDocFile)
-            m->deleteObjFile();
 #if ASYNCREAD
         if (aw->read(filei))
         {
             error(Loc(), "cannot read file %s", m->srcfile->name->toChars());
             fatal();
+            //NOTE: previous behavior was to do m->deleteObjFile(); before failing. But in some cases (cf -oq) we can't know that file as it requires knowing the module name, which requires reading the file.
         }
 #endif
         m->parse();
+        m->updateAfterParse();
+
+        if (firstmodule)
+        {   global.params.objfiles->push(m->objfile->name->str);
+            firstmodule = false;
+        }
+
+        if (!global.params.oneobj || modi == 0 || m->isDocFile)
+            m->deleteObjFile();
         if (m->isDocFile)
         {
             anydocfiles = true;
