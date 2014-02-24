@@ -127,6 +127,7 @@ struct Param
     char useInline;     // inline expand functions
     char release;       // build release version
     char preservePaths; // !=0 means don't strip path from source file
+    char fqNames;       // 1: fully qualified names based on module
     char warnings;      // 0: enable warnings
                         // 1: warnings as errors
                         // 2: informational warnings (no errors)
